@@ -10,6 +10,8 @@ impl RunConfig {
         let mut miner = None;
         let mut public_addr = None;
         let mut nat_traversal = false;
+        #[cfg(feature = "litep2p-devnet")]
+        let mut litep2p = false;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -45,6 +47,8 @@ impl RunConfig {
                     );
                 }
                 "--nat-traversal" => nat_traversal = true,
+                #[cfg(feature = "litep2p-devnet")]
+                "--litep2p" => litep2p = true,
                 option => return Err(format!("unknown node run option `{option}`")),
             }
             index += 1;
@@ -57,6 +61,8 @@ impl RunConfig {
             miner,
             public_addr,
             nat_traversal,
+            #[cfg(feature = "litep2p-devnet")]
+            litep2p,
         })
     }
 }
@@ -134,8 +140,12 @@ pub(super) fn print_network_info() -> Result<(), String> {
 }
 
 pub(super) fn print_help() {
+    #[cfg(feature = "litep2p-devnet")]
     println!(
-        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner ADDRESS] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode check [data-dir]\nnode account [data-dir] <address>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-address>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
+        "node run --litep2p [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS@PEER_ID]... [--miner ADDRESS]"
+    );
+    println!(
+        "node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner ADDRESS] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode litep2p [data-dir] [listen-address] [peer-address...] (requires litep2p-devnet feature)\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode check [data-dir]\nnode account [data-dir] <address>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-address>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
     );
 }
 

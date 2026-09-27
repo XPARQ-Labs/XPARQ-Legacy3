@@ -483,6 +483,32 @@ Run:
 ./target/release/node
 ```
 
+#### Experimental litep2p devnet transport
+
+Install `protoc` (the Protocol Buffers compiler) before building `litep2p`.
+This transport uses its own protocol and port; legacy TCP peers cannot connect to it.
+
+```bash
+cargo build -p node --no-default-features --features litep2p-devnet
+./target/debug/node litep2p ./data/devnet-litep2p 127.0.0.1:27677
+```
+
+For the normal node with RPC and optional mining, use `node run --litep2p`
+with `--data`, `--p2p`, `--rpc`, and `--peer ADDRESS@PEER_ID` as needed.
+
+The node prints its persistent litep2p peer ID. To connect another devnet node,
+pass `ADDRESS@PEER_ID`, for example:
+
+```bash
+./target/debug/node litep2p ./data/devnet-litep2p-2 127.0.0.1:27678 \
+  127.0.0.1:27677@<first-node-peer-id>
+```
+
+The pilot validates the genesis and chain-spec hashes during notification
+handshake, verifies requested headers before accepting matching blocks, and
+relays new blocks and mempool transactions. It follows direct extensions of
+the local chain; fork-choice synchronization still uses the legacy transport.
+
 ## Node commands
 
 Show available commands:

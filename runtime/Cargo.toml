@@ -17,6 +17,7 @@ mainnet = ["kernel/mainnet", "wallet/mainnet"]
 testnet = ["kernel/testnet", "wallet/testnet"]
 devnet = ["kernel/devnet", "wallet/devnet"]
 sqisign-blockchain-test = ["kernel/sqisign-blockchain-test", "kernel/sqisign-blockchain-test"]
+litep2p-devnet = ["devnet", "dep:litep2p", "dep:tokio", "dep:futures"]
 
 [dependencies]
 borsh.workspace = true
@@ -28,3 +29,6 @@ getrandom.workspace = true
 redb.workspace = true
 kernel.workspace = true
 wallet = { path = "../wallet", default-features = false }
+litep2p = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }

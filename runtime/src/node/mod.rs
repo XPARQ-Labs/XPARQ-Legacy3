@@ -132,6 +132,8 @@ struct RunConfig {
     miner: Option<Address>,
     public_addr: Option<SocketAddr>,
     nat_traversal: bool,
+    #[cfg(feature = "litep2p-devnet")]
+    litep2p: bool,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
@@ -183,6 +185,8 @@ mod config;
 mod explorer;
 mod gossip;
 mod index;
+#[cfg(feature = "litep2p-devnet")]
+mod litep2p_devnet;
 mod mempool;
 mod mining;
 mod p2p;
@@ -228,6 +232,13 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 .map_or(config::default_p2p_listen(), String::as_str),
             args.get(3..).unwrap_or(&[]),
         ),
+        #[cfg(feature = "litep2p-devnet")]
+        Some("litep2p") => litep2p_devnet::run(
+            args.get(1).map(String::as_str),
+            args.get(2)
+                .map_or(config::default_p2p_listen(), String::as_str),
+            args.get(3..).unwrap_or(&[]),
+        ),
         Some("peer") => p2p::connect_peer(
             args.get(1).map(String::as_str),
             args.get(2).ok_or("missing peer address")?,
@@ -258,6 +269,15 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
         }
     });
 
+    #[cfg(feature = "litep2p-devnet")]
+    if !config.litep2p {
+        p2p::start_peer_supervisor(
+            config.database.clone(),
+            config.peers.clone(),
+            Arc::clone(&sync_lock),
+        );
+    }
+    #[cfg(not(feature = "litep2p-devnet"))]
     p2p::start_peer_supervisor(
         config.database.clone(),
         config.peers.clone(),
@@ -276,6 +296,10 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
         println!("mining: enabled on the local canonical tip");
     } else {
         println!("mining: disabled");
+    }
+    #[cfg(feature = "litep2p-devnet")]
+    if config.litep2p {
+        return litep2p_devnet::run_database(config.database, &config.p2p_listen, &config.peers);
     }
     p2p::serve_p2p_database(config.database, &config.p2p_listen)
 }
