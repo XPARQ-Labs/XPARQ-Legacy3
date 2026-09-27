@@ -504,10 +504,12 @@ pass `ADDRESS@PEER_ID`, for example:
   127.0.0.1:27677@<first-node-peer-id>
 ```
 
-The pilot validates the genesis and chain-spec hashes during notification
-handshake, verifies requested headers before accepting matching blocks, and
-relays new blocks and mempool transactions. It follows direct extensions of
-the local chain; fork-choice synchronization still uses the legacy transport.
+The litep2p transport validates the genesis and chain-spec hashes during
+notification handshake. It verifies a peer's header branch and cumulative
+work, downloads matching blocks, and applies the same fork-choice and reorg
+logic as the legacy transport. It also relays new blocks and mempool transactions.
+Its devnet protocol names are `/xparq/devnet/blocks/2` and
+`/xparq/devnet/announce/2`.
 
 ## Node commands
 

@@ -179,8 +179,7 @@ pub(super) fn synchronize_blocks(
     stream: &mut TcpStream,
     sync: HeaderSyncResult,
 ) -> Result<usize, String> {
-    let count = sync.headers.len();
-    let mut blocks = Vec::with_capacity(count);
+    let mut blocks = Vec::with_capacity(sync.headers.len());
     for expected in &sync.headers {
         let expected_hash = expected.hash().map_err(|error| error.to_string())?;
         let mut request = Vec::with_capacity(33);
@@ -201,6 +200,27 @@ pub(super) fn synchronize_blocks(
         }
         blocks.push(block);
     }
+    apply_verified_branch(database, sync, blocks)
+}
+
+pub(super) fn apply_verified_branch(
+    database: &Path,
+    sync: HeaderSyncResult,
+    blocks: Vec<Block>,
+) -> Result<usize, String> {
+    if blocks.len() != sync.headers.len() {
+        return Err("downloaded block count does not match verified headers".into());
+    }
+    for (block, expected) in blocks.iter().zip(&sync.headers) {
+        if block.height() != expected.height
+            || block.header != expected.header
+            || block.hash().map_err(|error| error.to_string())?
+                != expected.hash().map_err(|error| error.to_string())?
+        {
+            return Err("downloaded block does not match verified header".into());
+        }
+    }
+    let count = blocks.len();
     let included = blocks
         .iter()
         .flat_map(|block| block.transactions())
