@@ -28,11 +28,7 @@ impl PoWTarget {
     pub fn from_bytes(bytes: [u8; POW_HASH_SIZE]) -> Option<Self> {
         let target = Self(bytes);
 
-        if target.is_zero() {
-            None
-        } else {
-            Some(target)
-        }
+        if target.is_zero() { None } else { Some(target) }
     }
 
     /// Returns the canonical big-endian target bytes.
@@ -154,9 +150,7 @@ impl PoWTarget {
 
         // Bitcoin-style 256-bit overflow limits.
         let overflow =
-            size > 34
-                || (mantissa > 0xff && size > 33)
-                || (mantissa > 0xffff && size > 32);
+            size > 34 || (mantissa > 0xff && size > 33) || (mantissa > 0xffff && size > 32);
 
         if overflow {
             return None;
@@ -171,8 +165,7 @@ impl PoWTarget {
             for index in 0..size {
                 let value_shift = 8 * (size - 1 - index);
 
-                bytes[POW_HASH_SIZE - size + index] =
-                    ((value >> value_shift) & 0xff) as u8;
+                bytes[POW_HASH_SIZE - size + index] = ((value >> value_shift) & 0xff) as u8;
             }
         } else {
             let mantissa_bytes = [
@@ -212,9 +205,7 @@ impl PoWTarget {
     /// Compact representation stores only the most significant 23 bits,
     /// therefore arbitrary targets may lose low-order precision.
     pub fn to_compact(self) -> u32 {
-        let Some(first_nonzero) =
-            self.0.iter().position(|byte| *byte != 0)
-        else {
+        let Some(first_nonzero) = self.0.iter().position(|byte| *byte != 0) else {
             // Normally unreachable because zero targets cannot be
             // constructed through the public constructors.
             return 0;
@@ -277,21 +268,15 @@ mod tests {
     fn bitcoin_genesis_compact_target_roundtrip() {
         let bits = 0x1d00_ffff;
 
-        let target =
-            PoWTarget::from_compact(bits).expect("valid compact target");
+        let target = PoWTarget::from_compact(bits).expect("valid compact target");
 
         assert_eq!(target.to_compact(), bits);
 
         assert_eq!(
             target.as_bytes(),
             &[
-                0x00, 0x00, 0x00, 0x00,
-                0xff, 0xff, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00,
             ]
         );
@@ -301,31 +286,24 @@ mod tests {
     fn xparq_pow_limit_roundtrip() {
         let bits = 0x207f_ffff;
 
-        let target =
-            PoWTarget::from_compact(bits).expect("valid XPARQ PoW limit");
+        let target = PoWTarget::from_compact(bits).expect("valid XPARQ PoW limit");
 
         assert_eq!(target.to_compact(), bits);
     }
 
     #[test]
     fn rejects_negative_compact_target() {
-        assert!(
-            PoWTarget::from_compact(0x1d80_ffff).is_none()
-        );
+        assert!(PoWTarget::from_compact(0x1d80_ffff).is_none());
     }
 
     #[test]
     fn rejects_zero_compact_target() {
-        assert!(
-            PoWTarget::from_compact(0).is_none()
-        );
+        assert!(PoWTarget::from_compact(0).is_none());
     }
 
     #[test]
     fn rejects_zero_raw_target() {
-        assert!(
-            PoWTarget::from_bytes([0_u8; POW_HASH_SIZE]).is_none()
-        );
+        assert!(PoWTarget::from_bytes([0_u8; POW_HASH_SIZE]).is_none());
     }
 
     #[test]
@@ -333,15 +311,12 @@ mod tests {
         let mut bytes = [0_u8; POW_HASH_SIZE];
         bytes[POW_HASH_SIZE - 1] = 1;
 
-        assert!(
-            PoWTarget::from_bytes(bytes).is_some()
-        );
+        assert!(PoWTarget::from_bytes(bytes).is_some());
     }
 
     #[test]
     fn target_scaling_harder_reduces_target() {
-        let target =
-            PoWTarget::from_compact(0x207f_ffff).expect("valid target");
+        let target = PoWTarget::from_compact(0x207f_ffff).expect("valid target");
 
         let harder = target
             .scale_ratio(95, 100)
@@ -352,8 +327,7 @@ mod tests {
 
     #[test]
     fn target_scaling_easier_increases_target() {
-        let target =
-            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+        let target = PoWTarget::from_compact(0x2007_ffff).expect("valid target");
 
         let easier = target
             .scale_ratio(105, 100)
@@ -364,8 +338,7 @@ mod tests {
 
     #[test]
     fn target_scaling_identity_preserves_target() {
-        let target =
-            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+        let target = PoWTarget::from_compact(0x2007_ffff).expect("valid target");
 
         let same = target
             .scale_ratio(100, 100)
@@ -376,8 +349,7 @@ mod tests {
 
     #[test]
     fn target_scaling_rejects_large_ratio_values() {
-        let target =
-            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+        let target = PoWTarget::from_compact(0x2007_ffff).expect("valid target");
 
         assert!(target.scale_ratio(256, 100).is_none());
         assert!(target.scale_ratio(100, 256).is_none());
@@ -385,8 +357,7 @@ mod tests {
 
     #[test]
     fn target_scaling_rejects_zero_ratio_values() {
-        let target =
-            PoWTarget::from_compact(0x2007_ffff).expect("valid target");
+        let target = PoWTarget::from_compact(0x2007_ffff).expect("valid target");
 
         assert!(target.scale_ratio(0, 100).is_none());
         assert!(target.scale_ratio(100, 0).is_none());
@@ -397,28 +368,19 @@ mod tests {
         let mut bytes = [0_u8; POW_HASH_SIZE];
         bytes[POW_HASH_SIZE - 1] = 1;
 
-        let target =
-            PoWTarget::from_bytes(bytes).expect("valid minimum target");
+        let target = PoWTarget::from_bytes(bytes).expect("valid minimum target");
 
-        let harder = target
-            .scale_ratio(95, 100)
-            .expect("scaling succeeds");
+        let harder = target.scale_ratio(95, 100).expect("scaling succeeds");
 
         assert_eq!(harder, target);
     }
 
     #[test]
     fn canonical_compact_targets_roundtrip() {
-        let targets = [
-            0x1d00_ffff,
-            0x207f_ffff,
-            0x2007_ffff,
-            0x1f12_3456,
-        ];
+        let targets = [0x1d00_ffff, 0x207f_ffff, 0x2007_ffff, 0x1f12_3456];
 
         for bits in targets {
-            let target =
-                PoWTarget::from_compact(bits).expect("valid compact target");
+            let target = PoWTarget::from_compact(bits).expect("valid compact target");
 
             assert_eq!(
                 target.to_compact(),

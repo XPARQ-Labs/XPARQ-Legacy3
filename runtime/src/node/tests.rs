@@ -332,9 +332,7 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
     )
     .unwrap();
     let transaction =
-        AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_account_intent(intent).unwrap(),
-        }));
+        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()));
     let genesis = genesis_block().unwrap();
     let block = Block::from_protocol_transactions(
         Height(1),
@@ -548,9 +546,7 @@ fn explorer_tx_index_finds_canonical_transaction() {
     .unwrap();
 
     let transaction =
-        AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_account_intent(intent).unwrap(),
-        }));
+        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()));
 
     let transaction_hash = transaction.id().expect("transaction ID");
 
@@ -688,9 +684,7 @@ fn explorer_index_extends_after_canonical_append() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_account_intent(intent).unwrap(),
-        }))
+        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
     };
 
     let transaction_one = make_transaction(0x42, 0x43, 0x44);
@@ -791,9 +785,7 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_account_intent(intent).unwrap(),
-        }))
+        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
     };
 
     let target_bits = ledger
@@ -903,9 +895,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_account_intent(intent).unwrap(),
-        }))
+        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
     };
 
     let target_bits = ledger
@@ -1211,9 +1201,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_account_intent(intent).unwrap(),
-        }))
+        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
     };
 
     let target_bits = ledger

@@ -3,7 +3,7 @@
 use super::utxo::{self, CoinUtxo};
 
 use crate::monetary::{
-    asset::{AssetShare, AssetContract, Metadata, Share, Unit},
+    asset::{AssetContract, AssetShare, Metadata, Share, Unit},
     coin::{CoinShare, Zeno},
 };
 

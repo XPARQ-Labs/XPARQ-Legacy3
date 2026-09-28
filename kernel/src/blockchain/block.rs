@@ -418,8 +418,8 @@ mod p3e_replay_tests {
         common::ChainContext,
         monetary::coin::{CoinOutput, XPQ, Zeno},
         transaction::{
-            AccountAuthorization, AccountIntent, AuthorizedAccountIntent,
-            AuthorizedSpendTransaction, AuthorizedTransaction, SpendIntent,
+            AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedTransaction,
+            SpendIntent,
         },
     };
 
@@ -440,13 +440,11 @@ mod p3e_replay_tests {
             .authorization_commitment(chain)
             .expect("authorization commitment");
 
-        AuthorizedTransaction::Spend(Box::new(AuthorizedSpendTransaction {
-            spend: AuthorizedAccountIntent {
-                intent,
-                authorization: AccountAuthorization {
-                    public_key: seed.public_key(),
-                    signature: seed.sign(commitment.as_bytes()),
-                },
+        AuthorizedTransaction::Spend(Box::new(AuthorizedAccountIntent {
+            intent,
+            authorization: AccountAuthorization {
+                public_key: seed.public_key(),
+                signature: seed.sign(commitment.as_bytes()),
             },
         }))
     }

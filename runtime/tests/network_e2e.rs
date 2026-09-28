@@ -343,11 +343,8 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
             kernel::transaction::SpendCharges::new(Zeno::from_zeno(archival_bytes.max(1))),
         )
         .unwrap();
-        let transaction = AuthorizedTransaction::Spend(Box::new(
-            kernel::transaction::AuthorizedSpendTransaction {
-                spend: sender.sign_account_intent(intent).unwrap(),
-            },
-        ));
+        let transaction =
+            AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()));
         let required = (canonical_bytes(&transaction).unwrap().len() as u64)
             .checked_mul(8)
             .unwrap();

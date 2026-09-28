@@ -69,9 +69,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent)?;
-        Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction { spend: signed },
-        )))
+        Ok(AuthorizedTransaction::Spend(Box::new(signed)))
     })?;
     submit_or_print_transaction(args, &transaction)
 }
@@ -135,9 +133,7 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent)?;
-        Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction { spend: signed },
-        )))
+        Ok(AuthorizedTransaction::Spend(Box::new(signed)))
     })?;
     submit_or_print_transaction(args, &transaction)
 }

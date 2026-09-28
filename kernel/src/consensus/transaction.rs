@@ -29,7 +29,7 @@ impl ConsensusIntent for SpendIntent {
     }
 
     fn commitment_for(&self, chain: ChainContext) -> Result<SpendIntentCommitment, IntentError> {
-        self.commitment(chain)
+        self.semantic_commitment(chain)
     }
 }
 
@@ -188,7 +188,7 @@ fn validate_authorized_transaction(
         AuthorizedTransaction::Spend(transaction) => {
             let transaction = *transaction;
 
-            let spend = prepare_spend_intent(transaction.spend, chain)?;
+            let spend = prepare_spend_intent(transaction, chain)?;
 
             match &spend.intent().spend {
                 Spend::Coin { inputs, outputs } => {
@@ -516,8 +516,7 @@ mod p3e_authorization_gate_tests {
             coin::{CoinOutput, Zeno},
         },
         transaction::{
-            AccountAuthorization, AccountIntent, AuthorizedAssetTransaction,
-            AuthorizedSpendTransaction, payment_commitment,
+            AccountAuthorization, AccountIntent, AuthorizedAssetTransaction, payment_commitment,
         },
     };
 
@@ -602,9 +601,8 @@ mod p3e_authorization_gate_tests {
         let chain = chain(0x11);
         let intent = coin_intent(&owner, 1, 10);
 
-        let transaction = AuthorizedTransaction::Spend(Box::new(AuthorizedSpendTransaction {
-            spend: authorize_principal(intent, &owner, chain),
-        }));
+        let transaction =
+            AuthorizedTransaction::Spend(Box::new(authorize_principal(intent, &owner, chain)));
 
         assert!(validate_authorization_gate(&transaction, chain, TEST_HEIGHT).is_ok());
     }
@@ -616,9 +614,8 @@ mod p3e_authorization_gate_tests {
         let chain_b = chain(0x22);
         let intent = coin_intent(&owner, 2, 10);
 
-        let transaction = AuthorizedTransaction::Spend(Box::new(AuthorizedSpendTransaction {
-            spend: authorize_principal(intent, &owner, chain_a),
-        }));
+        let transaction =
+            AuthorizedTransaction::Spend(Box::new(authorize_principal(intent, &owner, chain_a)));
 
         assert!(matches!(
             validate_authorization_gate(&transaction, chain_b, TEST_HEIGHT),

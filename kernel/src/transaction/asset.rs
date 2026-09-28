@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
 use crate::monetary::asset::{
-    AssetError, AssetShare, AssetContract, Metadata, Share, Unit, ensure_nonzero_asset_amount,
+    AssetContract, AssetError, AssetShare, Metadata, Share, Unit, ensure_nonzero_asset_amount,
     ensure_unique_asset_inputs,
 };
 

@@ -299,13 +299,11 @@ pub(super) fn address_transaction_activity(
     let miner = block.miner_address();
     let (sender, outputs, extra_sent) = match authorized {
         AuthorizedTransaction::Spend(tx) => {
-            let coin = &tx.spend;
-            coin.intent
-                .coin_parts()
-                .ok_or("spend payment is not coin")?;
+            let coin = &tx.intent;
+            coin.coin_parts().ok_or("spend payment is not coin")?;
             (
-                Some(coin.intent.signer),
-                coin_outputs_with_charges(&coin.intent, miner),
+                Some(coin.signer),
+                coin_outputs_with_charges(&coin, miner),
                 Zeno::ZERO,
             )
         }
@@ -438,15 +436,15 @@ pub(super) fn coin_burn(_intent: &kernel::transaction::SpendIntent) -> Zeno {
 }
 
 pub(super) fn spend_transaction_response(
-    transaction: &kernel::transaction::AuthorizedSpendTransaction,
+    transaction: &kernel::transaction::AuthorizedAccountIntent<kernel::transaction::SpendIntent>,
     protocol_burn: Zeno,
 ) -> serde_json::Value {
-    match &transaction.spend.intent.spend {
+    match &transaction.intent.spend {
         kernel::transaction::Spend::Coin { inputs, outputs } => serde_json::json!({
-            "type": "coin", "signer": kernel::crypto::address_to_string(&transaction.spend.intent.signer),
+            "type": "coin", "signer": kernel::crypto::address_to_string(&transaction.intent.signer),
             "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "outputs": public_outputs_response(outputs, Some(transaction.spend.intent.signer)),
-            "miner_fee": transaction.spend.intent.charges.miner_fee.as_zeno(),
+            "outputs": public_outputs_response(&outputs, Some(transaction.intent.signer)),
+            "miner_fee": transaction.intent.charges.miner_fee.as_zeno(),
             "protocol_burn": protocol_burn.as_zeno(),
         }),
         kernel::transaction::Spend::Combined {
@@ -457,14 +455,14 @@ pub(super) fn spend_transaction_response(
             asset_outputs,
         } => serde_json::json!({
             "type": "combined", "asset": asset.to_string(),
-            "signer": kernel::crypto::address_to_string(&transaction.spend.intent.signer),
+            "signer": kernel::crypto::address_to_string(&transaction.intent.signer),
             "coin_inputs": coin_inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "coin_outputs": public_outputs_response(coin_outputs, Some(transaction.spend.intent.signer)),
+            "coin_outputs": public_outputs_response(&coin_outputs, Some(transaction.intent.signer)),
             "asset_inputs": asset_inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "asset_outputs": asset_outputs.iter().map(|output| serde_json::json!({
                 "owner": asset_owner_response(output.recipient), "amount": output.amount.to_string(),
             })).collect::<Vec<_>>(),
-            "miner_fee": transaction.spend.intent.charges.miner_fee.as_zeno(),
+            "miner_fee": transaction.intent.charges.miner_fee.as_zeno(),
             "protocol_burn": protocol_burn.as_zeno(),
         }),
     }
@@ -503,7 +501,7 @@ pub(super) fn asset_transaction_response(
         "signer": kernel::crypto::address_to_string(&call.signer),
         "asset_instruction": instruction,
         "payment_sender": kernel::crypto::address_to_string(&transaction.payment.intent.signer),
-        "payment_outputs": public_outputs_response(coin_outputs(&transaction.payment.intent), Some(transaction.payment.intent.signer)),
+        "payment_outputs": public_outputs_response(&coin_outputs(&transaction.payment.intent), Some(transaction.payment.intent.signer)),
         "miner_fee": transaction.payment.intent.charges.miner_fee.as_zeno(),
         "protocol_burn": protocol_burn.as_zeno(),
     })
@@ -556,7 +554,7 @@ pub(super) fn checked_output_sum(amounts: impl IntoIterator<Item = Zeno>) -> Res
 
 pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
     match transaction {
-        AuthorizedTransaction::Spend(spend) => match spend.spend.intent.spend {
+        AuthorizedTransaction::Spend(spend) => match &spend.intent.spend {
             kernel::transaction::Spend::Coin { .. } => "transfer",
             kernel::transaction::Spend::Combined { .. } => "asset-transfer",
         },

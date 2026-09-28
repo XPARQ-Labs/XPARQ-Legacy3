@@ -12,8 +12,8 @@ use kernel::{
     consensus::{DECIMALS, StateTransitionWeight},
     crypto::{Address, Signature, address_from_string},
     transaction::{
-        AssetInstruction, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
-        AuthorizedTransaction, SpendCharges, SpendIntent,
+        AssetInstruction, AuthorizedAssetTransaction, AuthorizedTransaction, SpendCharges,
+        SpendIntent,
     },
 };
 use serde::Deserialize;

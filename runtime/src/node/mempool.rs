@@ -122,7 +122,6 @@ pub(super) fn reserved_coin_inputs(
         .iter()
         .flat_map(|transaction| match transaction {
             AuthorizedTransaction::Spend(transaction) => transaction
-                .spend
                 .intent
                 .coin_parts()
                 .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
@@ -187,7 +186,7 @@ pub(super) fn meets_minimum_relay_fee(transaction: &Transaction, encoded_size: u
 pub(super) fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, String> {
     match transaction {
         AuthorizedTransaction::Spend(transaction) => {
-            Ok(transaction.spend.intent.charges.miner_fee.as_zeno())
+            Ok(transaction.intent.charges.miner_fee.as_zeno())
         }
         AuthorizedTransaction::Asset(transaction) => {
             Ok(transaction.payment.intent.charges.miner_fee.as_zeno())

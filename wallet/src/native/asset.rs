@@ -193,9 +193,7 @@ pub(super) fn consolidate_asset_shares(args: &[String]) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
         let spend = wallet.sign_onchain_spend(intent)?;
 
-        Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction { spend },
-        )))
+        Ok(AuthorizedTransaction::Spend(Box::new(spend)))
     })?;
     submit_or_print_transaction(args, &transaction)
 }
@@ -274,9 +272,7 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
         )
         .map_err(|error| error.to_string())?;
         let spend = wallet.sign_onchain_spend(intent)?;
-        Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction { spend },
-        )))
+        Ok(AuthorizedTransaction::Spend(Box::new(spend)))
     })?;
     submit_or_print_transaction(args, &transaction)
 }

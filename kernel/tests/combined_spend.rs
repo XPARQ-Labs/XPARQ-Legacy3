@@ -15,8 +15,7 @@ use kernel::{
     },
     transaction::{
         AccountAuthorization, AccountIntent, AssetInstruction, AssetIntent,
-        AuthorizedAccountIntent, AuthorizedSpendTransaction, AuthorizedTransaction, SpendCharges,
-        SpendIntent,
+        AuthorizedAccountIntent, AuthorizedTransaction, SpendCharges, SpendIntent,
     },
 };
 
@@ -193,7 +192,7 @@ impl TransactionStateView for State {
 
 fn signed(intent: SpendIntent, seed: &SigningSeed, chain: ChainContext) -> AuthorizedTransaction {
     let commitment = intent.principal_commitment(chain).unwrap();
-    AuthorizedTransaction::Spend(Box::new(AuthorizedSpendTransaction {
+    AuthorizedTransaction::Spend(Box::new(AuthorizedAccountIntent {
         spend: AuthorizedAccountIntent {
             intent,
             authorization: AccountAuthorization {
@@ -238,9 +237,7 @@ fn one_signature_authorizes_coin_and_asset_together() {
 
     let mut tampered = transaction.clone();
     if let AuthorizedTransaction::Spend(tx) = &mut tampered {
-        if let kernel::transaction::Spend::Combined { coin_outputs, .. } =
-            &mut tx.spend.intent.spend
-        {
+        if let kernel::transaction::Spend::Combined { coin_outputs, .. } = &mut tx.intent.spend {
             coin_outputs[0].output = Address([7; 21]);
         }
     }
@@ -248,7 +245,7 @@ fn one_signature_authorizes_coin_and_asset_together() {
 
     let mut tampered_fee = transaction.clone();
     if let AuthorizedTransaction::Spend(tx) = &mut tampered_fee {
-        tx.spend.intent.charges.miner_fee = Zeno::from_zeno(1);
+        tx.intent.charges.miner_fee = Zeno::from_zeno(1);
     }
     assert!(validate_transaction(tampered_fee, chain, 1, &state).is_err());
 

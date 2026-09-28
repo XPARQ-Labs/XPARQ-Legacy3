@@ -211,23 +211,8 @@ impl AuthorizedAssetTransaction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct AuthorizedSpendTransaction {
-    pub spend: AuthorizedAccountIntent<SpendIntent>,
-}
-
-impl AuthorizedSpendTransaction {
-    pub fn verify_authorizations(
-        &self,
-        chain: ChainContext,
-        height: u64,
-    ) -> Result<bool, IntentError> {
-        self.spend.verify_principal(chain, height)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum AuthorizedTransaction {
-    Spend(Box<AuthorizedSpendTransaction>),
+    Spend(Box<AuthorizedAccountIntent<SpendIntent>>),
     Asset(Box<AuthorizedAssetTransaction>),
 }
 
@@ -245,17 +230,17 @@ impl AuthorizedTransaction {
             .map_err(|_| TransactionEncodingError::Encoding)?;
 
         let bytes = match self {
-            Self::Spend(tx) => match &tx.spend.intent.spend {
+            Self::Spend(tx) => match &tx.intent.spend {
                 Spend::Coin { .. } => canonical_bytes(&(
                     TRANSACTION_INTENT_ID_TAG,
                     INTENT_KIND_COIN_SPEND,
-                    &tx.spend.intent,
+                    &tx.intent,
                 )),
 
                 Spend::Combined { .. } => canonical_bytes(&(
                     TRANSACTION_INTENT_ID_TAG,
                     INTENT_KIND_COMBINED_SPEND,
-                    &tx.spend.intent,
+                    &tx.intent,
                 )),
             },
 
@@ -279,7 +264,7 @@ impl AuthorizedTransaction {
 
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         match self {
-            Self::Spend(tx) => tx.spend.intent.validate(),
+            Self::Spend(tx) => tx.intent.validate(),
 
             Self::Asset(tx) => {
                 tx.call
@@ -304,7 +289,7 @@ impl AuthorizedTransaction {
         self.validate_structure()?;
 
         match self {
-            Self::Spend(tx) => tx.verify_authorizations(chain, height),
+            Self::Spend(tx) => tx.verify_principal(chain, height),
 
             Self::Asset(tx) => tx.verify_authorizations(chain, height),
         }

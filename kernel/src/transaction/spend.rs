@@ -213,11 +213,6 @@ impl SpendIntent {
         canonical_bytes(&(chain.genesis_hash, self)).map_err(|_| IntentError::Encoding)
     }
 
-    /// Compatibility accessor. New code should use `semantic_bytes()`.
-    pub fn signing_bytes(&self, chain: ChainContext) -> Result<Vec<u8>, IntentError> {
-        self.semantic_bytes(chain)
-    }
-
     /// Semantic SpendIntent commitment.
     ///
     /// This identifies the unsigned spend semantics. Account signatures must
@@ -230,11 +225,6 @@ impl SpendIntent {
         Ok(SpendIntentCommitment::from_bytes(
             domain(HashDomain::SpendIntent, &bytes).into_bytes(),
         ))
-    }
-
-    /// Compatibility accessor. New code should use `semantic_commitment()`.
-    pub fn commitment(&self, chain: ChainContext) -> Result<SpendIntentCommitment, IntentError> {
-        self.semantic_commitment(chain)
     }
 
     pub fn coin_parts(&self) -> Option<(&[CoinShare], &[CoinOutput])> {
