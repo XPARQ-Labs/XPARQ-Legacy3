@@ -806,6 +806,18 @@ pub fn replace_blocks_and_mempool(
             .open_table(BLOCKS)
             .map_err(|error| format!("open blocks table: {error}"))?;
 
+        let mut common_height = None;
+        for block in blocks {
+            let matches = canonical
+                .get(block.height)
+                .map_err(|error| format!("compare canonical block: {error}"))?
+                .is_some_and(|stored| stored.value() == block.bytes.as_slice());
+            if !matches {
+                break;
+            }
+            common_height = Some(block.height);
+        }
+
         canonical
             .retain(|_, _| false)
             .map_err(|error| format!("clear canonical blocks: {error}"))?;
@@ -888,6 +900,13 @@ pub fn replace_blocks_and_mempool(
             .map_err(|error| format!("open mempool table: {error}"))?;
 
         replace_ordered_values(&mut transactions, mempool, "mempool")?;
+
+        let mut snapshots = transaction
+            .open_table(SNAPSHOTS)
+            .map_err(|error| format!("open snapshots during reorg: {error}"))?;
+        snapshots
+            .retain(|height, _| common_height.is_some_and(|last| height <= last))
+            .map_err(|error| format!("discard snapshots from replaced branch: {error}"))?;
     }
 
     transaction

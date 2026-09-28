@@ -25,6 +25,13 @@ pub struct Ledger {
     chain_context: Option<crate::common::ChainContext>,
 }
 
+/// Ledger data that cannot be rebuilt from the canonical block log alone.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LedgerSnapshot {
+    state: LedgerState,
+    journals: BTreeMap<Height, Vec<StateRollbackJournal>>,
+}
+
 struct ExecutedBlock {
     state: LedgerState,
     journals: Vec<StateRollbackJournal>,
@@ -36,6 +43,44 @@ struct ExecutedBlock {
 impl Ledger {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn snapshot(&self) -> LedgerSnapshot {
+        LedgerSnapshot {
+            state: self.state.clone(),
+            journals: self.journals.clone(),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: LedgerSnapshot, blocks: &[Block]) -> Result<Self, LedgerError> {
+        let genesis = blocks.first().ok_or(LedgerError::EmptyChain)?;
+        let tip = blocks.last().ok_or(LedgerError::EmptyChain)?;
+        let mut chain = Chain::new();
+        for block in blocks {
+            block.validate_structure().map_err(ConsensusError::from)?;
+            chain.insert_block(block.clone())?;
+            let expected_journals = usize::from(block.emission().is_some())
+                .checked_add(block.transactions().len())
+                .ok_or(LedgerError::MissingRollbackJournal)?;
+            if snapshot.journals.get(&block.height()).map(Vec::len) != Some(expected_journals) {
+                return Err(LedgerError::MissingRollbackJournal);
+            }
+        }
+        if snapshot.journals.len() != blocks.len() {
+            return Err(LedgerError::MissingRollbackJournal);
+        }
+        let ledger = Self {
+            chain,
+            state: snapshot.state,
+            journals: snapshot.journals,
+            chain_context: Some(crate::common::ChainContext::new(
+                genesis.hash()?.into_bytes(),
+            )),
+        };
+        if ledger.state_root()? != tip.state_root() {
+            return Err(LedgerError::InvalidStateRoot);
+        }
+        Ok(ledger)
     }
 
     pub fn tip_height(&self) -> Option<Height> {

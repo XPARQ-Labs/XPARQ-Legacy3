@@ -563,6 +563,16 @@ Or specify a data directory:
 ./target/release/node check /path/to/xparq-data
 ```
 
+### Local ledger snapshots
+
+The node writes a ledger snapshot every 1,000 blocks and after a sync that
+applies at least 1,000 blocks. It retains the two newest snapshots. On startup,
+the node verifies a snapshot against the local canonical block log, restores
+ledger state and rollback journals, then replays blocks after the snapshot.
+If no stored snapshot matches, it replays the chain from genesis. Version 1
+snapshots remain readable; new snapshots use the smaller version 2 format.
+The canonical block log remains required for startup and reorganization.
+
 ### Inspect mempool
 
 ```bash
