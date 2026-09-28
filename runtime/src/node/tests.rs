@@ -81,7 +81,7 @@ fn asset_transaction_projection_exposes_asset_and_action() {
             },
         },
     };
-    let response = asset_transaction_response(&transaction, Address::ZERO, Zeno::from_zeno(4_782));
+    let response = asset_transaction_response(&transaction, Zeno::from_zeno(4_782));
     assert_eq!(response["asset"], asset);
     assert_eq!(response["asset_instruction"]["type"], "register");
     assert_eq!(response["miner_fee"], 0);
@@ -90,15 +90,6 @@ fn asset_transaction_projection_exposes_asset_and_action() {
         response["asset_instruction"]["max_supply"],
         "100000000000000000000000"
     );
-}
-
-#[test]
-fn explorer_miner_fee_uses_block_miner_output() {
-    let outputs = vec![CoinOutput {
-        output: Recipient::BlockMiner,
-        amount: Zeno::from_zeno(2_284),
-    }];
-    assert_eq!(miner_fee_from_outputs(&outputs).unwrap(), 2_284);
 }
 
 #[test]
@@ -343,7 +334,6 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
     let transaction =
         AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
             spend: sender.sign_account_intent(intent).unwrap(),
-            payment: None,
         }));
     let genesis = genesis_block().unwrap();
     let block = Block::from_protocol_transactions(
@@ -560,7 +550,6 @@ fn explorer_tx_index_finds_canonical_transaction() {
     let transaction =
         AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
             spend: sender.sign_account_intent(intent).unwrap(),
-            payment: None,
         }));
 
     let transaction_hash = transaction.id().expect("transaction ID");
@@ -701,7 +690,6 @@ fn explorer_index_extends_after_canonical_append() {
 
         AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
             spend: sender.sign_account_intent(intent).unwrap(),
-            payment: None,
         }))
     };
 
@@ -805,7 +793,6 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
 
         AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
             spend: sender.sign_account_intent(intent).unwrap(),
-            payment: None,
         }))
     };
 
@@ -918,7 +905,6 @@ fn explorer_address_index_rebuilds_after_reorg() {
 
         AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
             spend: sender.sign_account_intent(intent).unwrap(),
-            payment: None,
         }))
     };
 
@@ -1227,7 +1213,6 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
 
         AuthorizedTransaction::Spend(Box::new(kernel::transaction::AuthorizedSpendTransaction {
             spend: sender.sign_account_intent(intent).unwrap(),
-            payment: None,
         }))
     };
 

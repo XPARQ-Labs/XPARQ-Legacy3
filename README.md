@@ -589,6 +589,28 @@ The canonical block log remains required for startup and reorganization.
 
 ## Useful development commands
 
+### Combined coin and asset spend
+
+`wallet asset-transfer` now places the asset transfer and its XPQ fee payment in
+one signed spend. The same wallet must own both sets of inputs. To transfer XPQ
+to a recipient in that transaction as well, provide both `--coin-to ADDRESS`
+and `--coin-amount XPQ`. Asset registration, mint, and burn still use their
+separate asset-call authorization and XPQ payment authorization.
+The old two-authorization asset-transfer variant has been removed; only the
+combined spend format is accepted after the chain reset.
+
+All XPQ spend intents now carry `SpendCharges { miner_fee }`. The miner fee is
+credited to the block miner as a separate UTXO; it is no longer encoded as a
+normal coin output. The protocol burn remains the verified difference between
+XPQ inputs, address outputs, and the miner fee. This changes transaction bytes
+and derived output IDs. Start upgraded nodes with fresh chain storage after the
+planned chain reset.
+Coin outputs encode the recipient address directly; the obsolete block-miner
+recipient tag is no longer part of a spend output.
+
+This transaction format changes consensus. Nodes that have not been upgraded
+will reject combined spends; deploy it with a coordinated network upgrade.
+
 Check the complete workspace:
 
 ```bash

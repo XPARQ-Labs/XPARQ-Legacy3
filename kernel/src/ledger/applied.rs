@@ -5,14 +5,13 @@ use borsh::BorshSerialize;
 use crypto::{Address, HASH_SIZE};
 
 use crate::{
-    common::Recipient,
     consensus::{AuthorizationValidated, ValidatedTransaction},
     ledger::{
         AssetRecord, AssetRollbackJournal, AssetState, CoinUtxo, LedgerState, SpendRollbackJournal,
         StateError, StateRollbackJournal, utxo,
     },
     monetary::{
-        asset::{AssetError, AssetOutput, AssetShare, AssetContract, Metadata, Share, Unit},
+        asset::{AssetContract, AssetError, AssetOutput, AssetShare, Metadata, Share, Unit},
         coin::{CoinShare, Zeno},
     },
     transaction::{AssetInstruction, AssetIntent, SpendIntent, SpendIntentCommitment},
@@ -37,16 +36,14 @@ impl LedgerState {
                     asset: None,
                 })
             }
-            ValidatedTransaction::AssetTransfer(transaction) => {
-                let payment_journal =
-                    self.apply_validated_onchain_spend(&transaction.payment, block_miner)?;
-
+            ValidatedTransaction::CombinedSpend(transaction) => {
+                let coin_journal =
+                    self.apply_validated_onchain_spend(&transaction.spend, block_miner)?;
                 let (asset, inputs, outputs) = transaction
                     .spend
                     .intent()
                     .asset_parts()
                     .ok_or(StateError::Asset(AssetError::InvalidProgram))?;
-
                 let asset_journal = match self.assets.apply_account_transfer(
                     &mut self.utxos,
                     asset,
@@ -55,15 +52,13 @@ impl LedgerState {
                     transaction.spend.commitment().into_bytes(),
                 ) {
                     Ok(journal) => journal,
-
                     Err(error) => {
-                        self.rollback_spend(payment_journal)?;
+                        self.rollback_spend(coin_journal)?;
                         return Err(StateError::Asset(error));
                     }
                 };
-
                 Ok(StateRollbackJournal {
-                    spend: Some(payment_journal),
+                    spend: Some(coin_journal),
                     asset: Some(asset_journal),
                 })
             }
@@ -136,6 +131,7 @@ impl LedgerState {
             })?;
             let burn = input_total
                 .checked_sub(output_total)
+                .and_then(|value| value.checked_sub(intent.charges.miner_fee))
                 .ok_or(StateError::InvalidTransaction)?;
 
             //
@@ -159,18 +155,26 @@ impl LedgerState {
                 // Ownership is bound by the transaction
                 // commitment and validated by consensus.
                 //
-                let recipient = match output.output {
-                    Recipient::Address(address) => address,
-                    Recipient::BlockMiner => block_miner,
-                };
                 self.utxos.insert_coin(
                     id,
                     CoinUtxo {
                         amount: output.amount,
-                        owner: recipient,
+                        owner: output.output,
                     },
                 )?;
 
+                journal.created_coin_ids.push(id);
+            }
+
+            if !intent.charges.miner_fee.is_zero() {
+                let id = coin_output_id(commitment, outputs.len())?;
+                self.utxos.insert_coin(
+                    id,
+                    CoinUtxo {
+                        amount: intent.charges.miner_fee,
+                        owner: block_miner,
+                    },
+                )?;
                 journal.created_coin_ids.push(id);
             }
 

@@ -448,7 +448,6 @@ mod p3e_replay_tests {
                     signature: seed.sign(commitment.as_bytes()),
                 },
             },
-            payment: None,
         }))
     }
 

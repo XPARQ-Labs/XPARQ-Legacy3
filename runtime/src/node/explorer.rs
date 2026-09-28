@@ -299,30 +299,33 @@ pub(super) fn address_transaction_activity(
     let miner = block.miner_address();
     let (sender, outputs, extra_sent) = match authorized {
         AuthorizedTransaction::Spend(tx) => {
-            let coin = tx.payment.as_ref().unwrap_or(&tx.spend);
-            let (_, outputs) = coin
-                .intent
+            let coin = &tx.spend;
+            coin.intent
                 .coin_parts()
                 .ok_or("spend payment is not coin")?;
-            (Some(coin.intent.signer), outputs, Zeno::ZERO)
+            (
+                Some(coin.intent.signer),
+                coin_outputs_with_charges(&coin.intent, miner),
+                Zeno::ZERO,
+            )
         }
         AuthorizedTransaction::Asset(tx) => (
             Some(tx.payment.intent.signer),
-            coin_outputs(&tx.payment.intent),
+            coin_outputs_with_charges(&tx.payment.intent, miner),
             coin_burn(&tx.payment.intent),
         ),
     };
     let received = checked_output_sum(
         outputs
             .iter()
-            .filter(|output| output_recipient(output, miner) == Some(address))
+            .filter(|output| output_recipient(output) == address)
             .map(|output| output.amount),
     )?;
     let (direction, amount) = if sender == Some(address) {
         let external = checked_output_sum(
             outputs
                 .iter()
-                .filter(|output| output_recipient(output, miner) != Some(address))
+                .filter(|output| output_recipient(output) != address)
                 .map(|output| output.amount),
         )?
         .checked_add(extra_sent)
@@ -400,7 +403,6 @@ pub(super) fn explorer_transaction_response(
             .len(),
         "transaction": transaction_response(
             transaction,
-            block.miner_address(),
             protocol_burn,
         ),
     }))
@@ -408,21 +410,27 @@ pub(super) fn explorer_transaction_response(
 
 pub(super) fn transaction_response(
     transaction: &Transaction,
-    miner: Address,
     protocol_burn: Zeno,
 ) -> serde_json::Value {
     match transaction {
-        AuthorizedTransaction::Spend(spend) => {
-            spend_transaction_response(spend, miner, protocol_burn)
-        }
-        AuthorizedTransaction::Asset(asset) => {
-            asset_transaction_response(asset, miner, protocol_burn)
-        }
+        AuthorizedTransaction::Spend(spend) => spend_transaction_response(spend, protocol_burn),
+        AuthorizedTransaction::Asset(asset) => asset_transaction_response(asset, protocol_burn),
     }
 }
 
 pub(super) fn coin_outputs(intent: &kernel::transaction::SpendIntent) -> &[CoinOutput] {
     intent.coin_parts().map_or(&[], |(_, outputs)| outputs)
+}
+
+pub(super) fn coin_outputs_with_charges(
+    intent: &kernel::transaction::SpendIntent,
+    miner: Address,
+) -> Vec<CoinOutput> {
+    let mut outputs = coin_outputs(intent).to_vec();
+    if !intent.charges.miner_fee.is_zero() {
+        outputs.push(CoinOutput::new(miner, intent.charges.miner_fee));
+    }
+    outputs
 }
 
 pub(super) fn coin_burn(_intent: &kernel::transaction::SpendIntent) -> Zeno {
@@ -431,32 +439,32 @@ pub(super) fn coin_burn(_intent: &kernel::transaction::SpendIntent) -> Zeno {
 
 pub(super) fn spend_transaction_response(
     transaction: &kernel::transaction::AuthorizedSpendTransaction,
-    miner: Address,
     protocol_burn: Zeno,
 ) -> serde_json::Value {
     match &transaction.spend.intent.spend {
         kernel::transaction::Spend::Coin { inputs, outputs } => serde_json::json!({
             "type": "coin", "signer": kernel::crypto::address_to_string(&transaction.spend.intent.signer),
             "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "outputs": public_outputs_response(outputs, miner, Some(transaction.spend.intent.signer)),
-            "miner_fee": miner_fee_from_outputs(outputs).unwrap_or(0),
+            "outputs": public_outputs_response(outputs, Some(transaction.spend.intent.signer)),
+            "miner_fee": transaction.spend.intent.charges.miner_fee.as_zeno(),
             "protocol_burn": protocol_burn.as_zeno(),
         }),
-        kernel::transaction::Spend::Asset {
+        kernel::transaction::Spend::Combined {
+            coin_inputs,
+            coin_outputs,
             asset,
-            inputs,
-            outputs,
+            asset_inputs,
+            asset_outputs,
         } => serde_json::json!({
-            "type": "asset", "asset": asset.to_string(),
+            "type": "combined", "asset": asset.to_string(),
             "signer": kernel::crypto::address_to_string(&transaction.spend.intent.signer),
-            "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "outputs": outputs.iter().map(|output| serde_json::json!({
+            "coin_inputs": coin_inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "coin_outputs": public_outputs_response(coin_outputs, Some(transaction.spend.intent.signer)),
+            "asset_inputs": asset_inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "asset_outputs": asset_outputs.iter().map(|output| serde_json::json!({
                 "owner": asset_owner_response(output.recipient), "amount": output.amount.to_string(),
             })).collect::<Vec<_>>(),
-            "payment_outputs": transaction.payment.as_ref().map(|payment| public_outputs_response(coin_outputs(&payment.intent), miner, Some(payment.intent.signer))),
-            "miner_fee": transaction.payment.as_ref()
-                .map(|payment| miner_fee_from_outputs(coin_outputs(&payment.intent)).unwrap_or(0))
-                .unwrap_or(0),
+            "miner_fee": transaction.spend.intent.charges.miner_fee.as_zeno(),
             "protocol_burn": protocol_burn.as_zeno(),
         }),
     }
@@ -464,7 +472,6 @@ pub(super) fn spend_transaction_response(
 
 pub(super) fn asset_transaction_response(
     transaction: &kernel::transaction::AuthorizedAssetTransaction,
-    miner: Address,
     protocol_burn: Zeno,
 ) -> serde_json::Value {
     let call = &transaction.call.intent;
@@ -496,8 +503,8 @@ pub(super) fn asset_transaction_response(
         "signer": kernel::crypto::address_to_string(&call.signer),
         "asset_instruction": instruction,
         "payment_sender": kernel::crypto::address_to_string(&transaction.payment.intent.signer),
-        "payment_outputs": public_outputs_response(coin_outputs(&transaction.payment.intent), miner, Some(transaction.payment.intent.signer)),
-        "miner_fee": miner_fee_from_outputs(coin_outputs(&transaction.payment.intent)).unwrap_or(0),
+        "payment_outputs": public_outputs_response(coin_outputs(&transaction.payment.intent), Some(transaction.payment.intent.signer)),
+        "miner_fee": transaction.payment.intent.charges.miner_fee.as_zeno(),
         "protocol_burn": protocol_burn.as_zeno(),
     })
 }
@@ -511,44 +518,30 @@ pub(super) fn asset_owner_response(owner: Address) -> serde_json::Value {
 
 pub(super) fn public_outputs_response(
     outputs: &[CoinOutput],
-    miner: Address,
     sender: Option<Address>,
 ) -> Vec<serde_json::Value> {
     outputs
         .iter()
         .map(|output| {
-            let (address, output_type, role) = match output.output {
-                Recipient::Address(address) => (
-                    Some(kernel::crypto::address_to_string(&address)),
-                    "address",
-                    if sender == Some(address) {
-                        "change"
-                    } else {
-                        "recipient"
-                    },
-                ),
-                Recipient::BlockMiner => (
-                    Some(kernel::crypto::address_to_string(&miner)),
-                    "miner",
-                    "miner_fee",
-                ),
+            let address = output.output;
+            let role = if sender == Some(address) {
+                "change"
+            } else {
+                "recipient"
             };
             serde_json::json!({
-                "address": address,
+                "address": kernel::crypto::address_to_string(&address),
                 "amount": output.amount.as_zeno(),
                 "unit": "zeno",
-                "type": output_type,
+                "type": "address",
                 "role": role,
             })
         })
         .collect()
 }
 
-pub(super) fn output_recipient(output: &CoinOutput, miner: Address) -> Option<Address> {
-    match output.output {
-        Recipient::Address(address) => Some(address),
-        Recipient::BlockMiner => Some(miner),
-    }
+pub(super) fn output_recipient(output: &CoinOutput) -> Address {
+    output.output
 }
 
 pub(super) fn checked_output_sum(amounts: impl IntoIterator<Item = Zeno>) -> Result<Zeno, String> {
@@ -565,7 +558,7 @@ pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
     match transaction {
         AuthorizedTransaction::Spend(spend) => match spend.spend.intent.spend {
             kernel::transaction::Spend::Coin { .. } => "transfer",
-            kernel::transaction::Spend::Asset { .. } => "asset-transfer",
+            kernel::transaction::Spend::Combined { .. } => "asset-transfer",
         },
         AuthorizedTransaction::Asset(_) => "asset",
     }
@@ -700,7 +693,6 @@ pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_jso
                     .len(),
                 "transaction": transaction_response(
                     transaction,
-                    block.miner_address(),
                     protocol_burn,
                 ),
             }))

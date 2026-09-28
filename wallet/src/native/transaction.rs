@@ -61,15 +61,16 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         if change > 0 {
             outputs.push(CoinOutput::new(change_address, Zeno::from_zeno(change)));
         }
-        outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let intent = SpendIntent::coin(wallet.address(), selected, outputs)
-            .map_err(|error| error.to_string())?;
+        let intent = SpendIntent::coin_with_charges(
+            wallet.address(),
+            selected,
+            outputs,
+            SpendCharges::new(Zeno::from_zeno(fee)),
+        )
+        .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction {
-                spend: signed,
-                payment: None,
-            },
+            AuthorizedSpendTransaction { spend: signed },
         )))
     })?;
     submit_or_print_transaction(args, &transaction)
@@ -122,18 +123,20 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
             .and_then(|amount| amount.checked_sub(protocol_burn))
             .filter(|amount| *amount > 0)
             .ok_or("UTXO total is insufficient for consolidation fee and protocol burn")?;
-        let outputs = vec![
-            CoinOutput::new(wallet.address(), Zeno::from_zeno(consolidated)),
-            CoinOutput::block_miner(Zeno::from_zeno(fee)),
-        ];
-        let intent = SpendIntent::coin(wallet.address(), inputs.clone(), outputs)
-            .map_err(|error| error.to_string())?;
+        let outputs = vec![CoinOutput::new(
+            wallet.address(),
+            Zeno::from_zeno(consolidated),
+        )];
+        let intent = SpendIntent::coin_with_charges(
+            wallet.address(),
+            inputs.clone(),
+            outputs,
+            SpendCharges::new(Zeno::from_zeno(fee)),
+        )
+        .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction {
-                spend: signed,
-                payment: None,
-            },
+            AuthorizedSpendTransaction { spend: signed },
         )))
     })?;
     submit_or_print_transaction(args, &transaction)

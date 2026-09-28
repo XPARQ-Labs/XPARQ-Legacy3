@@ -9,7 +9,8 @@ use crate::common::ChainContext;
 use crate::{
     monetary::{
         asset::{
-            AssetOutput, AssetContract, Share, ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
+            AssetContract, AssetOutput, Share, ensure_nonzero_asset_amount,
+            ensure_unique_asset_inputs,
         },
         coin::{CoinOutput, CoinShare, Zeno},
     },
@@ -49,17 +50,32 @@ pub enum Spend {
         inputs: Vec<CoinShare>,
         outputs: Vec<CoinOutput>,
     },
-    Asset {
+    Combined {
+        coin_inputs: Vec<CoinShare>,
+        coin_outputs: Vec<CoinOutput>,
         asset: AssetContract,
-        inputs: Vec<Share>,
-        outputs: Vec<AssetOutput>,
+        asset_inputs: Vec<Share>,
+        asset_outputs: Vec<AssetOutput>,
     },
+}
+
+/// Explicit miner payment. The required protocol burn is derived by consensus.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct SpendCharges {
+    pub miner_fee: Zeno,
+}
+
+impl SpendCharges {
+    pub const fn new(miner_fee: Zeno) -> Self {
+        Self { miner_fee }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct SpendIntent {
     pub signer: Address,
     pub spend: Spend,
+    pub charges: SpendCharges,
 }
 
 impl SpendIntent {
@@ -68,30 +84,71 @@ impl SpendIntent {
         inputs: Vec<CoinShare>,
         outputs: Vec<CoinOutput>,
     ) -> Result<Self, IntentError> {
+        Self::coin_with_charges(signer, inputs, outputs, SpendCharges::default())
+    }
+
+    pub fn coin_with_charges(
+        signer: Address,
+        inputs: Vec<CoinShare>,
+        outputs: Vec<CoinOutput>,
+        charges: SpendCharges,
+    ) -> Result<Self, IntentError> {
         let intent = Self {
             signer,
             spend: Spend::Coin { inputs, outputs },
+            charges,
         };
         intent.validate()?;
         Ok(intent)
     }
 
-    pub fn asset(
+    pub fn combined(
         signer: Address,
+        coin_inputs: Vec<CoinShare>,
+        coin_outputs: Vec<CoinOutput>,
         asset: AssetContract,
-        inputs: Vec<Share>,
-        outputs: Vec<AssetOutput>,
+        asset_inputs: Vec<Share>,
+        asset_outputs: Vec<AssetOutput>,
+    ) -> Result<Self, IntentError> {
+        Self::combined_with_charges(
+            signer,
+            coin_inputs,
+            coin_outputs,
+            asset,
+            asset_inputs,
+            asset_outputs,
+            SpendCharges::default(),
+        )
+    }
+
+    pub fn combined_with_charges(
+        signer: Address,
+        coin_inputs: Vec<CoinShare>,
+        coin_outputs: Vec<CoinOutput>,
+        asset: AssetContract,
+        asset_inputs: Vec<Share>,
+        asset_outputs: Vec<AssetOutput>,
+        charges: SpendCharges,
     ) -> Result<Self, IntentError> {
         let intent = Self {
             signer,
-            spend: Spend::Asset {
+            spend: Spend::Combined {
+                coin_inputs,
+                coin_outputs,
                 asset,
-                inputs,
-                outputs,
+                asset_inputs,
+                asset_outputs,
             },
+            charges,
         };
         intent.validate()?;
         Ok(intent)
+    }
+
+    pub fn with_charges(mut self, charges: SpendCharges) -> Result<Self, IntentError> {
+        self.charges = charges;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), IntentError> {
@@ -100,7 +157,7 @@ impl SpendIntent {
                 if inputs.is_empty() {
                     return Err(IntentError::EmptyInputs);
                 }
-                if outputs.is_empty() {
+                if outputs.is_empty() && self.charges.miner_fee.is_zero() {
                     return Err(IntentError::EmptyOutputs);
                 }
 
@@ -115,23 +172,36 @@ impl SpendIntent {
 
                 Ok(())
             }
-            Spend::Asset {
-                inputs, outputs, ..
+            Spend::Combined {
+                coin_inputs,
+                coin_outputs,
+                asset_inputs,
+                asset_outputs,
+                ..
             } => {
-                if inputs.is_empty() {
+                if coin_inputs.is_empty()
+                    || (coin_outputs.is_empty() && self.charges.miner_fee.is_zero())
+                    || asset_inputs.is_empty()
+                    || asset_outputs.is_empty()
+                {
                     return Err(IntentError::EmptyInputs);
                 }
-                if outputs.is_empty() {
-                    return Err(IntentError::EmptyOutputs);
+                let mut unique = BTreeSet::new();
+                if coin_inputs.iter().any(|id| !unique.insert(*id)) {
+                    return Err(IntentError::DuplicateInput);
                 }
-
-                ensure_unique_asset_inputs(inputs).map_err(|_| IntentError::InvalidAssetCall)?;
-
-                for output in outputs {
+                if coin_outputs
+                    .iter()
+                    .any(|output| output.amount == Zeno::ZERO)
+                {
+                    return Err(IntentError::ZeroAmount);
+                }
+                ensure_unique_asset_inputs(asset_inputs)
+                    .map_err(|_| IntentError::InvalidAssetCall)?;
+                for output in asset_outputs {
                     ensure_nonzero_asset_amount(output.amount)
                         .map_err(|_| IntentError::InvalidAssetCall)?;
                 }
-
                 Ok(())
             }
         }
@@ -170,18 +240,23 @@ impl SpendIntent {
     pub fn coin_parts(&self) -> Option<(&[CoinShare], &[CoinOutput])> {
         match &self.spend {
             Spend::Coin { inputs, outputs } => Some((inputs, outputs)),
-            Spend::Asset { .. } => None,
+            Spend::Combined {
+                coin_inputs,
+                coin_outputs,
+                ..
+            } => Some((coin_inputs, coin_outputs)),
         }
     }
 
     pub fn asset_parts(&self) -> Option<(AssetContract, &[Share], &[AssetOutput])> {
         match &self.spend {
-            Spend::Asset {
-                asset,
-                inputs,
-                outputs,
-            } => Some((*asset, inputs, outputs)),
             Spend::Coin { .. } => None,
+            Spend::Combined {
+                asset,
+                asset_inputs,
+                asset_outputs,
+                ..
+            } => Some((*asset, asset_inputs, asset_outputs)),
         }
     }
 }
@@ -190,9 +265,10 @@ impl SpendIntent {
 mod conservation_tests {
     use super::*;
     use crate::monetary::{
-        asset::{AssetOutput, AssetContract, Share, Unit},
+        asset::{AssetContract, AssetOutput, Share, Unit},
         coin::{CoinOutput, CoinShare, Zeno},
     };
+    use crypto::HASH16_SIZE;
 
     fn address(byte: u8) -> Address {
         Address([byte; crypto::ADDRESS_SIZE])
@@ -214,10 +290,12 @@ mod conservation_tests {
     #[test]
     fn duplicate_asset_inputs_are_rejected_structurally() {
         let input = Share::from_bytes([0x22; HASH16_SIZE]);
-        let asset = AssetContract::from_bytes([0x33; HASH16_SIZE]);
+        let asset = AssetContract::from_bytes([0x33; HASH_SIZE]);
 
-        let result = SpendIntent::asset(
+        let result = SpendIntent::combined(
             address(1),
+            vec![CoinShare::from_bytes([0x12; HASH16_SIZE])],
+            vec![CoinOutput::new(address(1), Zeno::ONE)],
             asset,
             vec![input, input],
             vec![AssetOutput::new(address(2), Unit::from_units(1))],
@@ -242,10 +320,12 @@ mod conservation_tests {
     #[test]
     fn zero_value_asset_output_is_rejected_structurally() {
         let input = Share::from_bytes([0x55; HASH16_SIZE]);
-        let asset = AssetContract::from_bytes([0x66; HASH16_SIZE]);
+        let asset = AssetContract::from_bytes([0x66; HASH_SIZE]);
 
-        let result = SpendIntent::asset(
+        let result = SpendIntent::combined(
             address(1),
+            vec![CoinShare::from_bytes([0x56; HASH16_SIZE])],
+            vec![CoinOutput::new(address(1), Zeno::ONE)],
             asset,
             vec![input],
             vec![AssetOutput::new(address(2), Unit::ZERO)],

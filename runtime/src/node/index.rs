@@ -42,28 +42,27 @@ fn transaction_addresses(
 
     let (sender, outputs) = match transaction {
         AuthorizedTransaction::Spend(transaction) => {
-            let coin = transaction.payment.as_ref().unwrap_or(&transaction.spend);
+            let coin = &transaction.spend;
 
-            let (_, outputs) = coin
-                .intent
+            coin.intent
                 .coin_parts()
                 .ok_or("spend payment is not coin")?;
-
-            (coin.intent.signer, outputs)
+            (
+                coin.intent.signer,
+                explorer::coin_outputs_with_charges(&coin.intent, miner),
+            )
         }
 
         AuthorizedTransaction::Asset(transaction) => (
             transaction.payment.intent.signer,
-            explorer::coin_outputs(&transaction.payment.intent),
+            explorer::coin_outputs_with_charges(&transaction.payment.intent, miner),
         ),
     };
 
     addresses.insert(sender);
 
     for output in outputs {
-        if let Some(address) = explorer::output_recipient(output, miner) {
-            addresses.insert(address);
-        }
+        addresses.insert(explorer::output_recipient(&output));
     }
 
     Ok(addresses)

@@ -1,5 +1,5 @@
 use super::*;
-use super::{config::*, explorer::*, gossip::*, state::*};
+use super::{config::*, gossip::*, state::*};
 
 pub(super) fn submit_transaction(path: Option<&str>, encoded: &str) -> Result<(), String> {
     let database = database_path(path);
@@ -122,9 +122,7 @@ pub(super) fn reserved_coin_inputs(
         .iter()
         .flat_map(|transaction| match transaction {
             AuthorizedTransaction::Spend(transaction) => transaction
-                .payment
-                .as_ref()
-                .unwrap_or(&transaction.spend)
+                .spend
                 .intent
                 .coin_parts()
                 .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
@@ -188,28 +186,13 @@ pub(super) fn meets_minimum_relay_fee(transaction: &Transaction, encoded_size: u
 
 pub(super) fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, String> {
     match transaction {
-        AuthorizedTransaction::Spend(transaction) => miner_fee_from_outputs(coin_outputs(
-            &transaction
-                .payment
-                .as_ref()
-                .unwrap_or(&transaction.spend)
-                .intent,
-        )),
+        AuthorizedTransaction::Spend(transaction) => {
+            Ok(transaction.spend.intent.charges.miner_fee.as_zeno())
+        }
         AuthorizedTransaction::Asset(transaction) => {
-            miner_fee_from_outputs(coin_outputs(&transaction.payment.intent))
+            Ok(transaction.payment.intent.charges.miner_fee.as_zeno())
         }
     }
-}
-
-pub(super) fn miner_fee_from_outputs(outputs: &[CoinOutput]) -> Result<u64, String> {
-    let mut fees = outputs
-        .iter()
-        .filter(|output| output.output == Recipient::BlockMiner);
-    let fee = fees.next().map_or(0, |output| output.amount.as_zeno());
-    if fees.next().is_some() {
-        return Err("transaction has multiple block-miner fee outputs".into());
-    }
-    Ok(fee)
 }
 
 pub(super) fn read_mempool(path: &Path) -> Result<Vec<Transaction>, String> {

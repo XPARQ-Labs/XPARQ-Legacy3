@@ -21,7 +21,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use kernel::{
     block::{Block, Emission},
     codec::{block_bytes, decode_block},
-    common::{Height, Nonce, Recipient},
+    common::{Height, Nonce},
     consensus::{
         ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
         expected_next_difficulty, new_pow_memory, validate_transaction,

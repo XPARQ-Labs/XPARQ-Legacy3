@@ -4,8 +4,6 @@ use crypto::{
 };
 use std::{fmt, str::FromStr};
 
-use crate::common::Recipient;
-
 pub const DECIMALS: u8 = 8;
 
 #[derive(
@@ -274,21 +272,14 @@ fn different_output_indexes_create_different_shares() {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CoinOutput {
-    pub output: Recipient,
+    pub output: Address,
     pub amount: Zeno,
 }
 
 impl CoinOutput {
     pub const fn new(recipient: Address, amount: Zeno) -> Self {
         Self {
-            output: Recipient::Address(recipient),
-            amount,
-        }
-    }
-
-    pub const fn block_miner(amount: Zeno) -> Self {
-        Self {
-            output: Recipient::BlockMiner,
+            output: recipient,
             amount,
         }
     }

@@ -13,7 +13,7 @@ use kernel::{
     crypto::{Address, Signature, address_from_string},
     transaction::{
         AssetInstruction, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
-        AuthorizedTransaction, SpendIntent,
+        AuthorizedTransaction, SpendCharges, SpendIntent,
     },
 };
 use serde::Deserialize;

@@ -303,31 +303,6 @@ impl AccountWallet {
             },
         })
     }
-
-    pub fn sign_asset_spend_payment(
-        &self,
-
-        parent: &SpendIntent,
-
-        payment: SpendIntent,
-    ) -> Result<AuthorizedAccountIntent<SpendIntent>, String> {
-        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-
-        let commitment =
-            payment_commitment(parent, &payment, chain).map_err(|error| error.to_string())?;
-
-        let signature = self.signing_seed.sign(commitment.as_bytes());
-
-        Ok(AuthorizedAccountIntent {
-            intent: payment,
-
-            authorization: AccountAuthorization {
-                public_key: self.public_key.clone(),
-
-                signature,
-            },
-        })
-    }
 }
 
 #[cfg(test)]

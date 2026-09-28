@@ -156,10 +156,7 @@ pub(super) fn consolidate_asset_shares(args: &[String]) -> Result<(), String> {
         recipient: wallet.address(),
         amount: kernel::monetary::asset::Unit::from_units(total),
     };
-    let spend = wallet.sign_onchain_spend(
-        SpendIntent::asset(wallet.address(), asset, inputs, vec![output.clone()])
-            .map_err(|error| error.to_string())?,
-    )?;
+    let asset_outputs = vec![output.clone()];
     let asset_weight = kernel::monetary::asset::checked_asset_entry_weight(
         0,
         32,
@@ -184,18 +181,20 @@ pub(super) fn consolidate_asset_shares(args: &[String]) -> Result<(), String> {
         if change > 0 {
             fee_outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
-        let payment_intent = SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
-            .map_err(|error| error.to_string())?;
-
-        let payment = wallet
-            .0
-            .sign_asset_spend_payment(&spend.intent, payment_intent)?;
+        let intent = SpendIntent::combined_with_charges(
+            wallet.address(),
+            coin_inputs,
+            fee_outputs,
+            asset,
+            inputs.clone(),
+            asset_outputs.clone(),
+            SpendCharges::new(Zeno::from_zeno(fee)),
+        )
+        .map_err(|error| error.to_string())?;
+        let spend = wallet.sign_onchain_spend(intent)?;
 
         Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction {
-                spend: spend.clone(),
-                payment: Some(payment),
-            },
+            AuthorizedSpendTransaction { spend },
         )))
     })?;
     submit_or_print_transaction(args, &transaction)
@@ -212,6 +211,18 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
     let asset = parse_asset(args)?;
     let amount = parse_asset_amount(args, "--amount")?;
+    let coin_recipient = option(args, "--coin-to")
+        .map(|value| address_from_string(value).map_err(|error| error.to_string()))
+        .transpose()?;
+    let coin_amount = option(args, "--coin-amount")
+        .map(parse_amount)
+        .transpose()?;
+    if coin_recipient.is_some() != coin_amount.is_some() {
+        return Err("--coin-to and --coin-amount must be provided together".into());
+    }
+    if coin_amount.is_some_and(|value| value == Zeno::ZERO) {
+        return Err("--coin-amount must be positive".into());
+    }
     let (inputs, total) = select_asset_inputs(rpc, wallet.address(), asset, amount.as_units())?;
     let mut outputs = vec![kernel::monetary::asset::AssetOutput { recipient, amount }];
     if total > amount.as_units() {
@@ -220,10 +231,6 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
             amount: kernel::monetary::asset::Unit::from_units(total - amount.as_units()),
         });
     }
-    let spend = wallet.sign_onchain_spend(
-        SpendIntent::asset(wallet.address(), asset, inputs, outputs.clone())
-            .map_err(|e| e.to_string())?,
-    )?;
     let asset_weight = outputs.iter().try_fold(0_u64, |weight, output| {
         kernel::monetary::asset::checked_asset_entry_weight(
             weight,
@@ -237,30 +244,38 @@ fn submit_asset_spend(args: &[String], recipient: Address) -> Result<(), String>
         .map_err(|e| format!("calculate asset state weight: {e:?}"))
     })?;
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
+        let coin_transfer = coin_amount.unwrap_or(Zeno::ZERO);
+        let required = fee
+            .checked_add(coin_transfer.as_zeno())
+            .ok_or("coin transfer plus fee overflow")?;
         let (coin_inputs, _, _state_burn, change) = select_account_inputs_with_state_burn(
             rpc,
             &wallet,
-            fee,
-            1,
+            required,
+            1 + u64::from(coin_recipient.is_some()),
             asset_weight,
             archival_burn,
         )?;
         let mut fee_outputs = Vec::new();
+        if let Some(to) = coin_recipient {
+            fee_outputs.push(CoinOutput::new(to, coin_transfer));
+        }
         if change > 0 {
             fee_outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
-        fee_outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let payment_intent = SpendIntent::coin(wallet.address(), coin_inputs, fee_outputs)
-            .map_err(|error| error.to_string())?;
-
-        let payment = wallet
-            .0
-            .sign_asset_spend_payment(&spend.intent, payment_intent)?;
+        let intent = SpendIntent::combined_with_charges(
+            wallet.address(),
+            coin_inputs,
+            fee_outputs,
+            asset,
+            inputs.clone(),
+            outputs.clone(),
+            SpendCharges::new(Zeno::from_zeno(fee)),
+        )
+        .map_err(|error| error.to_string())?;
+        let spend = wallet.sign_onchain_spend(intent)?;
         Ok(AuthorizedTransaction::Spend(Box::new(
-            AuthorizedSpendTransaction {
-                spend: spend.clone(),
-                payment: Some(payment),
-            },
+            AuthorizedSpendTransaction { spend },
         )))
     })?;
     submit_or_print_transaction(args, &transaction)
@@ -354,9 +369,13 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
         if change > 0 {
             outputs.push(CoinOutput::new(wallet.address(), Zeno::from_zeno(change)));
         }
-        outputs.push(CoinOutput::block_miner(Zeno::from_zeno(fee)));
-        let fee_intent = SpendIntent::coin(wallet.address(), inputs, outputs)
-            .map_err(|error| error.to_string())?;
+        let fee_intent = SpendIntent::coin_with_charges(
+            wallet.address(),
+            inputs,
+            outputs,
+            SpendCharges::new(Zeno::from_zeno(fee)),
+        )
+        .map_err(|error| error.to_string())?;
         let fee = wallet.0.sign_asset_call_payment(&call.intent, fee_intent)?;
         Ok(AuthorizedTransaction::Asset(Box::new(
             AuthorizedAssetTransaction {

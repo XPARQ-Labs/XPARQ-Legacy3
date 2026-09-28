@@ -9,6 +9,6 @@ pub use authorization::{
     AuthorizedAccountIntent, AuthorizedAssetTransaction, AuthorizedSpendTransaction,
     AuthorizedTransaction, IntentId, TransactionId, payment_commitment,
 };
-pub use spend::{Spend, SpendIntent, SpendIntentCommitment};
+pub use spend::{Spend, SpendCharges, SpendIntent, SpendIntentCommitment};
 
 pub type Transaction = AuthorizedTransaction;

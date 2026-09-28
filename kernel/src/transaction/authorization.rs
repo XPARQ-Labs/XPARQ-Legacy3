@@ -78,7 +78,7 @@ impl TransactionId {
 const TRANSACTION_INTENT_ID_TAG: [u8; 27] = *b"xparq:transaction-intent:v1";
 
 const INTENT_KIND_COIN_SPEND: u8 = 1;
-const INTENT_KIND_ASSET_SPEND: u8 = 2;
+const INTENT_KIND_COMBINED_SPEND: u8 = 2;
 const INTENT_KIND_ASSET_CALL: u8 = 3;
 
 /// Something that can be authorized by an account.
@@ -213,7 +213,6 @@ impl AuthorizedAssetTransaction {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedSpendTransaction {
     pub spend: AuthorizedAccountIntent<SpendIntent>,
-    pub payment: Option<AuthorizedAccountIntent<SpendIntent>>,
 }
 
 impl AuthorizedSpendTransaction {
@@ -222,25 +221,7 @@ impl AuthorizedSpendTransaction {
         chain: ChainContext,
         height: u64,
     ) -> Result<bool, IntentError> {
-        if !self.spend.verify_principal(chain, height)? {
-            return Ok(false);
-        }
-
-        match (&self.spend.intent.spend, &self.payment) {
-            (Spend::Coin { .. }, None) => Ok(true),
-
-            (Spend::Asset { .. }, Some(payment)) => {
-                let commitment = payment_commitment(&self.spend.intent, &payment.intent, chain)?;
-
-                Ok(payment.authorization.verify_commitment(
-                    payment.intent.signer,
-                    &commitment,
-                    height,
-                ))
-            }
-
-            _ => Err(IntentError::InvalidAssetCall),
-        }
+        self.spend.verify_principal(chain, height)
     }
 }
 
@@ -264,21 +245,18 @@ impl AuthorizedTransaction {
             .map_err(|_| TransactionEncodingError::Encoding)?;
 
         let bytes = match self {
-            Self::Spend(tx) => match (&tx.spend.intent.spend, &tx.payment) {
-                (Spend::Coin { .. }, None) => canonical_bytes(&(
+            Self::Spend(tx) => match &tx.spend.intent.spend {
+                Spend::Coin { .. } => canonical_bytes(&(
                     TRANSACTION_INTENT_ID_TAG,
                     INTENT_KIND_COIN_SPEND,
                     &tx.spend.intent,
                 )),
 
-                (Spend::Asset { .. }, Some(payment)) => canonical_bytes(&(
+                Spend::Combined { .. } => canonical_bytes(&(
                     TRANSACTION_INTENT_ID_TAG,
-                    INTENT_KIND_ASSET_SPEND,
+                    INTENT_KIND_COMBINED_SPEND,
                     &tx.spend.intent,
-                    &payment.intent,
                 )),
-
-                _ => return Err(TransactionEncodingError::Encoding),
             },
 
             Self::Asset(tx) => canonical_bytes(&(
@@ -301,21 +279,7 @@ impl AuthorizedTransaction {
 
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         match self {
-            Self::Spend(tx) => {
-                tx.spend.intent.validate()?;
-
-                match (&tx.spend.intent.spend, &tx.payment) {
-                    (Spend::Coin { .. }, None) => Ok(()),
-
-                    (Spend::Asset { .. }, Some(payment))
-                        if matches!(&payment.intent.spend, Spend::Coin { .. }) =>
-                    {
-                        payment.intent.validate()
-                    }
-
-                    _ => Err(IntentError::InvalidAssetCall),
-                }
-            }
+            Self::Spend(tx) => tx.spend.intent.validate(),
 
             Self::Asset(tx) => {
                 tx.call
@@ -349,11 +313,9 @@ impl AuthorizedTransaction {
 
 /// Payment authorization bound to its parent operation.
 ///
-/// `parent` can be SpendIntent or AssetIntent.
-/// Because the serialized parent itself is included, we no longer need
-/// separate AssetSpendPayment / AssetCallPayment roles.
-pub fn payment_commitment<P: BorshSerialize>(
-    parent: &P,
+/// The serialized asset call is included so its XPQ payment cannot be reused.
+pub fn payment_commitment(
+    parent: &AssetIntent,
     payment: &SpendIntent,
     chain: ChainContext,
 ) -> Result<AuthorizationCommitment, IntentError> {

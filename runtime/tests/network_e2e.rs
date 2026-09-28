@@ -330,7 +330,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let mut archival_bytes = 0;
     let transaction = loop {
         let burn = state_burn.as_zeno() + archival_bytes;
-        let intent = SpendIntent::coin(
+        let intent = SpendIntent::coin_with_charges(
             sender.address,
             vec![input_id],
             vec![
@@ -339,14 +339,13 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
                     sender.address,
                     Zeno::from_zeno(input_amount - sent.as_zeno() - burn - archival_bytes.max(1)),
                 ),
-                CoinOutput::block_miner(Zeno::from_zeno(archival_bytes.max(1))),
             ],
+            kernel::transaction::SpendCharges::new(Zeno::from_zeno(archival_bytes.max(1))),
         )
         .unwrap();
         let transaction = AuthorizedTransaction::Spend(Box::new(
             kernel::transaction::AuthorizedSpendTransaction {
                 spend: sender.sign_account_intent(intent).unwrap(),
-                payment: None,
             },
         ));
         let required = (canonical_bytes(&transaction).unwrap().len() as u64)
