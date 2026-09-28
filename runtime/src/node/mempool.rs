@@ -42,6 +42,13 @@ pub(super) fn insert_mempool_transaction(
     transaction: Transaction,
     duplicate_is_ok: bool,
 ) -> Result<[u8; 32], String> {
+    let encoded = canonical_bytes(&transaction).map_err(|error| error.to_string())?;
+    if encoded.len() > MAX_STORED_TRANSACTION_SIZE {
+        return Err("transaction exceeds consensus size limit".into());
+    }
+    transaction
+        .validate_structure()
+        .map_err(|error| error.to_string())?;
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
@@ -94,7 +101,7 @@ pub(super) fn reconcile_mempool(
         let Ok(encoded) = canonical_bytes(&transaction) else {
             continue;
         };
-        if encoded.len() > kernel::block::MAX_BLOCK_SIZE {
+        if encoded.len() > MAX_STORED_TRANSACTION_SIZE {
             continue;
         }
         if !meets_minimum_relay_fee(&transaction, encoded.len()) {
@@ -149,7 +156,7 @@ pub(super) fn validate_mempool(
     let mut state = ledger.state().clone();
     for transaction in transactions {
         let encoded = canonical_bytes(transaction).map_err(|error| error.to_string())?;
-        if encoded.len() > kernel::block::MAX_BLOCK_SIZE {
+        if encoded.len() > MAX_STORED_TRANSACTION_SIZE {
             return Err("transaction cannot fit in a block".into());
         }
         let required_fee = minimum_relay_fee(encoded.len())?;
@@ -210,6 +217,9 @@ pub(super) fn read_mempool(path: &Path) -> Result<Vec<Transaction>, String> {
     encoded
         .into_iter()
         .map(|bytes| {
+            if bytes.is_empty() || bytes.len() > MAX_STORED_TRANSACTION_SIZE {
+                return Err("stored transaction size is outside allowed range".into());
+            }
             canonical_decode(&bytes).map_err(|error| format!("decode mempool transaction: {error}"))
         })
         .collect()

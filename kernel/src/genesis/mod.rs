@@ -3,7 +3,7 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    blockchain::{Block, GENESIS_TARGET_BITS, MAX_BLOCK_SIZE},
+    blockchain::{Block, GENESIS_TARGET_BITS, MAX_BLOCK_SIZE, MAX_BLOCK_TRANSACTIONS},
     common::ChainContext,
     common::Nonce,
     consensus::{
@@ -14,6 +14,7 @@ use crate::{
         WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
     },
     ledger::{Ledger, LedgerError},
+    transaction::{MAX_TRANSACTION_ITEMS, MAX_TRANSACTION_SIZE},
 };
 
 use borsh::BorshSerialize;
@@ -65,7 +66,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 1;
+pub const CHAIN_SPEC_VERSION: u32 = 3;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -103,6 +104,10 @@ struct ChainSpecIdentity<'a> {
 
     // Block / address / hash
     max_block_size: u64,
+    max_block_transactions: u64,
+    max_transaction_size: u64,
+    max_transaction_items: u64,
+    block_accounting_rule: &'a str,
     address_size: u32,
     address_encoding: &'a str,
     hash_size: u32,
@@ -150,6 +155,10 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 
         // Block / address / hash
         max_block_size: MAX_BLOCK_SIZE as u64,
+        max_block_transactions: MAX_BLOCK_TRANSACTIONS as u64,
+        max_transaction_size: MAX_TRANSACTION_SIZE as u64,
+        max_transaction_items: MAX_TRANSACTION_ITEMS as u64,
+        block_accounting_rule: "coin-utxo-delta-v1",
         address_size: ADDRESS_SIZE as u32,
         address_encoding: "xparq-0x-sha3-checksum",
         hash_size: HASH_SIZE as u32,
@@ -162,6 +171,21 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
     let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
 
     Ok(domain_hash(HashDomain::ChainSpec, &bytes))
+}
+
+#[cfg(all(test, feature = "mainnet"))]
+mod phase3_chain_spec_tests {
+    #[test]
+    fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
+        assert_eq!(super::CHAIN_SPEC_VERSION, 3);
+        assert_eq!(
+            super::chain_spec_hash().unwrap().into_bytes(),
+            [
+                144, 110, 3, 100, 135, 55, 114, 199, 137, 213, 171, 190, 192, 239, 253, 238, 83,
+                94, 128, 32, 6, 176, 42, 116, 230, 235, 250, 179, 164, 76, 126, 0,
+            ]
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------

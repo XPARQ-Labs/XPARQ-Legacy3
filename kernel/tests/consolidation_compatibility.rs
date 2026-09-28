@@ -13,12 +13,12 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
     );
     // The target-bits header and current consensus parameters define a new chain
     // identity while the native asset IDs below remain frozen independently.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 1);
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 3);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            106, 172, 21, 51, 120, 227, 180, 226, 161, 82, 13, 94, 88, 170, 110, 162, 74, 56, 17,
-            42, 48, 125, 206, 216, 159, 219, 133, 92, 46, 244, 133, 73
+            144, 110, 3, 100, 135, 55, 114, 199, 137, 213, 171, 190, 192, 239, 253, 238, 83, 94,
+            128, 32, 6, 176, 42, 116, 230, 235, 250, 179, 164, 76, 126, 0
         ]
     );
     assert_ne!(
@@ -45,12 +45,11 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
 fn native_asset_and_share_ids_are_frozen() {
     use kernel::{
         crypto::{ADDRESS_SIZE, Address},
-        native::asset::{Contract, Metadata, Share, Unit},
+        monetary::asset::{AssetContract, Metadata, Share, Unit},
     };
-    let parent = Contract::derive(
+    let parent = AssetContract::derive(
         &Metadata::new(
             "Test Asset".into(),
-            6,
             Unit::from_units(1_000_000),
             Address([7; ADDRESS_SIZE]),
             Address([7; ADDRESS_SIZE]),
@@ -61,10 +60,10 @@ fn native_asset_and_share_ids_are_frozen() {
     .unwrap();
     assert_eq!(
         parent.to_string(),
-        "feed2b96c7334175274266e769fb4b306b4dd2c4d4796e18d2d062956fccbb86"
+        "71495bdff294767e0164dd776bad398ad5ebb638263176ff16092dcb369aa4aa"
     );
     assert_eq!(
         Share::derive(parent, [9; 32], 3).to_string(),
-        "8adbbb49c5d709aaf9b4cce593527b9b46efd09f434e64e9fe72eef7006560ec"
+        "881a6a48837e0bc76a91790cd124507c"
     );
 }

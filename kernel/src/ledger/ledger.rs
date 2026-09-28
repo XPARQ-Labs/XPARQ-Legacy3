@@ -9,13 +9,15 @@ use crate::{
     common::Height,
     consensus::{
         ApplyBlockState, CoinInputState, ConsensusError, EmissionError, TransactionConsensusError,
-        TransactionStateView, ValidatedBlock, validate_emission, validate_transaction,
+        TransactionStateView, ValidatedBlock, ValidatedTransaction, validate_emission,
+        validate_transaction,
     },
     ledger::{CoinUtxo, LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
     monetary::{
         asset::{AssetContract, Unit},
         coin::{CoinShare, Zeno},
     },
+    transaction::SpendIntent,
 };
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -46,7 +48,7 @@ struct ExecutedBlock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlockTransitionPoint {
     EmissionCreated,
-    TransactionApplied,
+    BeforeAccountingCheck,
 }
 
 impl Ledger {
@@ -141,13 +143,13 @@ impl Ledger {
     }
 
     fn execute_block(&self, block: &Block) -> Result<ExecutedBlock, LedgerError> {
-        self.execute_block_with_checkpoint(block, |_| Ok(()))
+        self.execute_block_with_checkpoint(block, |_, _| Ok(()))
     }
 
     fn execute_block_with_checkpoint(
         &self,
         block: &Block,
-        mut checkpoint: impl FnMut(BlockTransitionPoint) -> Result<(), LedgerError>,
+        mut checkpoint: impl FnMut(BlockTransitionPoint, &mut LedgerState) -> Result<(), LedgerError>,
     ) -> Result<ExecutedBlock, LedgerError> {
         self.chain.validate_next_block(block)?;
         match self.chain.tip_height() {
@@ -164,6 +166,9 @@ impl Ledger {
         }
 
         let mut state = self.state.clone();
+        let coin_supply_before = coin_utxo_total(&state)?;
+        let mut validated_subsidy = Zeno::ZERO;
+        let mut expected_burns = Zeno::ZERO;
         let mut journals = Vec::new();
         let block_weight =
             u32::try_from(block.weight()?).map_err(|_| LedgerError::InvalidBlockWeight)?;
@@ -178,6 +183,8 @@ impl Ledger {
 
         if !block.is_genesis() {
             let emission = validate_emission(block)?;
+            validated_subsidy = emission.subsidy();
+            expected_burns = emission.protocol_burn();
             let id = CoinShare::from_emission_origin(&emission.origin().0);
             state.utxos.insert_coin(
                 id,
@@ -186,7 +193,7 @@ impl Ledger {
                     owner: emission.recipient(),
                 },
             )?;
-            checkpoint(BlockTransitionPoint::EmissionCreated)?;
+            checkpoint(BlockTransitionPoint::EmissionCreated, &mut state)?;
             state.coin.total_mined = state
                 .coin
                 .total_mined
@@ -208,14 +215,24 @@ impl Ledger {
         for transaction in block.transactions() {
             let validated =
                 validate_transaction(transaction.clone(), chain_context, height.0, &state)?;
+            let spend = match &validated {
+                ValidatedTransaction::CoinSpend(tx) => tx.spend.intent(),
+                ValidatedTransaction::CombinedSpend(tx) => tx.spend.intent(),
+                ValidatedTransaction::AssetCall(tx) => tx.payment.intent(),
+            };
+            let burn = expected_spend_burn(&state, spend)?;
+            expected_burns = expected_burns
+                .checked_add(burn)
+                .ok_or(LedgerError::SupplyOverflow)?;
             journals.push(state.apply_validated_transaction(
                 &validated,
                 block.miner_address(),
                 chain_context,
             )?);
-            checkpoint(BlockTransitionPoint::TransactionApplied)?;
         }
 
+        checkpoint(BlockTransitionPoint::BeforeAccountingCheck, &mut state)?;
+        validate_block_accounting(coin_supply_before, &state, validated_subsidy, expected_burns)?;
         state.validate_supply_invariants()?;
         let state_root = state.application_state_root()?;
         Ok(ExecutedBlock {
@@ -295,6 +312,39 @@ impl Ledger {
         self.journals.insert(height, executed.journals);
         Ok(())
     }
+}
+
+fn coin_utxo_total(state: &LedgerState) -> Result<Zeno, LedgerError> {
+    state.utxos.coins().try_fold(Zeno::ZERO, |total, (_, coin)| {
+        total.checked_add(coin.amount).ok_or(LedgerError::SupplyOverflow)
+    })
+}
+
+fn expected_spend_burn(state: &LedgerState, intent: &SpendIntent) -> Result<Zeno, LedgerError> {
+    let (inputs, outputs) = intent.coin_parts().ok_or(LedgerError::BlockAccountingMismatch)?;
+    let input_total = inputs.iter().try_fold(Zeno::ZERO, |total, id| {
+        let coin = state.utxos.coin(id).ok_or(LedgerError::BlockAccountingMismatch)?;
+        total.checked_add(coin.amount).ok_or(LedgerError::SupplyOverflow)
+    })?;
+    let output_total = outputs.iter().try_fold(intent.charges.miner_fee, |total, output| {
+        total.checked_add(output.amount).ok_or(LedgerError::SupplyOverflow)
+    })?;
+    input_total.checked_sub(output_total).ok_or(LedgerError::BlockAccountingMismatch)
+}
+
+fn validate_block_accounting(
+    before: Zeno,
+    after: &LedgerState,
+    subsidy: Zeno,
+    burns: Zeno,
+) -> Result<(), LedgerError> {
+    let expected = before.checked_add(subsidy)
+        .and_then(|total| total.checked_sub(burns))
+        .ok_or(LedgerError::BlockAccountingMismatch)?;
+    if coin_utxo_total(after)? != expected {
+        return Err(LedgerError::BlockAccountingMismatch);
+    }
+    Ok(())
 }
 
 //
@@ -446,6 +496,8 @@ pub enum LedgerError {
 
     CoinSupplyMismatch,
 
+    BlockAccountingMismatch,
+
     AssetSupplyMismatch,
 
     UnknownAssetShare,
@@ -498,6 +550,10 @@ impl fmt::Display for LedgerError {
 
             Self::CoinSupplyMismatch => {
                 formatter.write_str("coin UTXO total does not match supply")
+            }
+
+            Self::BlockAccountingMismatch => {
+                formatter.write_str("block coin supply delta does not match subsidy and burns")
             }
 
             Self::AssetSupplyMismatch => {
@@ -553,6 +609,10 @@ impl From<crypto::CodecError> for LedgerError {
     }
 }
 
+#[cfg(all(test, feature = "mainnet"))]
+#[path = "phase4_vectors.rs"]
+mod phase4_vectors;
+
 #[cfg(test)]
 mod p3e_block_atomicity_tests {
     use super::*;
@@ -569,6 +629,53 @@ mod p3e_block_atomicity_tests {
 
     fn ledger_bytes(ledger: &Ledger) -> Vec<u8> {
         borsh::to_vec(ledger).expect("ledger must serialize canonically")
+    }
+
+    #[test]
+    fn unexpected_coin_supply_delta_is_rejected() {
+        let mut state = LedgerState::default();
+        state.utxos.insert_coin(
+            CoinShare::from_bytes([0x44; crypto::HASH16_SIZE]),
+            CoinUtxo {
+                amount: Zeno::from_zeno(109),
+                owner: crypto::Address([0x55; crypto::ADDRESS_SIZE]),
+            },
+        ).unwrap();
+        assert!(matches!(
+            validate_block_accounting(
+                Zeno::from_zeno(100),
+                &state,
+                Zeno::from_zeno(10),
+                Zeno::from_zeno(2),
+            ),
+            Err(LedgerError::BlockAccountingMismatch)
+        ));
+    }
+
+    #[test]
+    fn block_with_forged_extra_coin_is_rejected_even_if_supply_record_matches() {
+        let ledger = genesis::genesis_ledger().unwrap();
+        let before = ledger_bytes(&ledger);
+        let block = empty_height_one_candidate(
+            &ledger,
+            crypto::Address([0x56; crypto::ADDRESS_SIZE]),
+        );
+        let result = ledger.execute_block_with_checkpoint(&block, |point, state| {
+            if point == BlockTransitionPoint::BeforeAccountingCheck {
+                let (id, coin) = state.utxos.coins().next().unwrap();
+                let forged = CoinUtxo {
+                    amount: coin.amount.checked_add(Zeno::ONE).unwrap(),
+                    ..*coin
+                };
+                state.utxos.consume_coin(&id).unwrap();
+                state.utxos.insert_coin(id, forged).unwrap();
+                state.coin.total_mined = state.coin.total_mined.checked_add(Zeno::ONE).unwrap();
+                assert!(state.validate_supply_invariants().is_ok());
+            }
+            Ok(())
+        });
+        assert!(matches!(result, Err(LedgerError::BlockAccountingMismatch)));
+        assert_eq!(ledger_bytes(&ledger), before);
     }
 
     fn empty_next_candidate(ledger: &Ledger, miner: crypto::Address) -> Block {
@@ -788,7 +895,7 @@ mod p3e_block_atomicity_tests {
         let before = ledger_bytes(&ledger);
 
         assert!(matches!(
-            ledger.execute_block_with_checkpoint(&block, |point| {
+            ledger.execute_block_with_checkpoint(&block, |point, _| {
                 if point == BlockTransitionPoint::EmissionCreated {
                     Err(LedgerError::InvalidStateRoot)
                 } else {

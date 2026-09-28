@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    io::{Error, ErrorKind, Read},
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -14,7 +17,7 @@ use crate::{
         },
         coin::{CoinOutput, CoinShare, Zeno},
     },
-    transaction::IntentError,
+    transaction::{IntentError, MAX_TRANSACTION_ITEMS, deserialize_bounded_vec},
 };
 
 /// Canonical semantic commitment for a spend intent.
@@ -44,7 +47,7 @@ impl SpendIntentCommitment {
 /// An account-authorized transfer.
 ///
 /// Register, mint, and burn remain monetary asset operations.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub enum Spend {
     Coin {
         inputs: Vec<CoinShare>,
@@ -57,6 +60,25 @@ pub enum Spend {
         asset_inputs: Vec<Share>,
         asset_outputs: Vec<AssetOutput>,
     },
+}
+
+impl BorshDeserialize for Spend {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        match u8::deserialize_reader(reader)? {
+            0 => Ok(Self::Coin {
+                inputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
+                outputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
+            }),
+            1 => Ok(Self::Combined {
+                coin_inputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
+                coin_outputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
+                asset: AssetContract::deserialize_reader(reader)?,
+                asset_inputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
+                asset_outputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
+            }),
+            _ => Err(Error::new(ErrorKind::InvalidData, "invalid spend variant")),
+        }
+    }
 }
 
 /// Explicit miner payment. The required protocol burn is derived by consensus.
@@ -152,8 +174,12 @@ impl SpendIntent {
     }
 
     pub fn validate(&self) -> Result<(), IntentError> {
+        let within_limit = |length: usize| length <= MAX_TRANSACTION_ITEMS;
         match &self.spend {
             Spend::Coin { inputs, outputs } => {
+                if !within_limit(inputs.len()) || !within_limit(outputs.len()) {
+                    return Err(IntentError::TooManyItems);
+                }
                 if inputs.is_empty() {
                     return Err(IntentError::EmptyInputs);
                 }
@@ -179,6 +205,13 @@ impl SpendIntent {
                 asset_outputs,
                 ..
             } => {
+                if !within_limit(coin_inputs.len())
+                    || !within_limit(coin_outputs.len())
+                    || !within_limit(asset_inputs.len())
+                    || !within_limit(asset_outputs.len())
+                {
+                    return Err(IntentError::TooManyItems);
+                }
                 if coin_inputs.is_empty()
                     || (coin_outputs.is_empty() && self.charges.miner_fee.is_zero())
                     || asset_inputs.is_empty()

@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    io::{Error as IoError, ErrorKind, Read},
+    io::{Error as IoError, ErrorKind, Read, Write},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -15,10 +15,11 @@ use crate::{
     common::{Height, Nonce},
     error::{BlockError, CodecError},
     monetary::coin::Zeno,
-    transaction::Transaction,
+    transaction::{MAX_TRANSACTION_SIZE, Transaction},
 };
 
 pub const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+pub const MAX_BLOCK_TRANSACTIONS: usize = 4096;
 pub const GENESIS_TARGET_BITS: u32 = 0x207f_ffff;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -91,6 +92,12 @@ impl BorshDeserialize for Block {
 
 fn deserialize_block_transactions<R: Read>(reader: &mut R) -> std::io::Result<Vec<Transaction>> {
     let length = u32::deserialize_reader(reader)? as usize;
+    if length > MAX_BLOCK_TRANSACTIONS {
+        return Err(IoError::new(
+            ErrorKind::InvalidData,
+            "block transaction count exceeds limit",
+        ));
+    }
 
     let mut transactions = Vec::new();
 
@@ -99,10 +106,60 @@ fn deserialize_block_transactions<R: Read>(reader: &mut R) -> std::io::Result<Ve
         .map_err(|_| IoError::new(ErrorKind::OutOfMemory, "block allocation failed"))?;
 
     for _ in 0..length {
-        transactions.push(Transaction::deserialize_reader(reader)?);
+        let mut limited = TransactionReader {
+            inner: reader,
+            remaining: MAX_TRANSACTION_SIZE,
+        };
+        transactions.push(Transaction::deserialize_reader(&mut limited)?);
     }
 
     Ok(transactions)
+}
+
+struct TransactionReader<'a, R> {
+    inner: &'a mut R,
+    remaining: usize,
+}
+
+impl<R: Read> Read for TransactionReader<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 && !bytes.is_empty() {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "transaction exceeds size limit",
+            ));
+        }
+        let allowed = bytes.len().min(self.remaining);
+        let read = self.inner.read(&mut bytes[..allowed])?;
+        self.remaining -= read;
+        Ok(read)
+    }
+}
+
+struct CappedCounter {
+    count: usize,
+    maximum: usize,
+}
+
+impl Write for CappedCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .count
+            .checked_add(bytes.len())
+            .ok_or_else(|| IoError::new(ErrorKind::InvalidData, "block exceeds size limit"))?;
+        if next > self.maximum {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "block exceeds size limit",
+            ));
+        }
+        self.count = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -183,6 +240,9 @@ impl Block {
     /// Signatures, values, state burn, and state root execution remain
     /// consensus/ledger responsibilities.
     pub fn validate_structure(&self) -> Result<(), BlockError> {
+        if self.body.transactions.len() > MAX_BLOCK_TRANSACTIONS {
+            return Err(BlockError::InvalidTransaction);
+        }
         if self.is_genesis() {
             if self.body.emission.is_some() {
                 return Err(BlockError::UnexpectedEmission);
@@ -194,21 +254,33 @@ impl Block {
             return Err(BlockError::MissingEmission);
         }
 
-        if has_duplicate_transactions(&self.body.transactions)? {
-            return Err(BlockError::DuplicateTransaction);
+        if !transactions_are_structurally_valid(&self.body.transactions) {
+            return Err(BlockError::InvalidTransaction);
         }
 
-        let serialized_weight = self.weight()?;
-        if serialized_weight > MAX_BLOCK_SIZE || self.header.block_weight as usize > MAX_BLOCK_SIZE
-        {
+        if self.header.block_weight as usize > MAX_BLOCK_SIZE {
             return Err(BlockError::BlockTooHeavy);
         }
+
+        let mut counter = CappedCounter {
+            count: 0,
+            maximum: MAX_BLOCK_SIZE,
+        };
+        self.serialize(&mut counter)
+            .map_err(|_| BlockError::BlockTooHeavy)?;
+        let serialized_weight = counter.count;
         if (self.header.block_weight as usize) < serialized_weight {
             return Err(BlockError::InvalidBlockWeight);
         }
 
-        if !transactions_are_structurally_valid(&self.body.transactions) {
+        if self.body.transactions.iter().any(|transaction| {
+            canonical_bytes(transaction).map_or(true, |bytes| bytes.len() > MAX_TRANSACTION_SIZE)
+        }) {
             return Err(BlockError::InvalidTransaction);
+        }
+
+        if has_duplicate_transactions(&self.body.transactions)? {
+            return Err(BlockError::DuplicateTransaction);
         }
 
         if self.header.merkle_root
@@ -474,5 +546,24 @@ mod p3e_replay_tests {
             block.validate_structure(),
             Err(BlockError::DuplicateTransaction)
         ));
+    }
+
+    #[test]
+    fn oversized_block_transaction_count_prefix_is_rejected() {
+        let mut bytes = Block::genesis().unwrap().to_bytes().unwrap();
+        let count = bytes.len() - 4;
+        bytes[count..].copy_from_slice(&((MAX_BLOCK_TRANSACTIONS + 1) as u32).to_le_bytes());
+        assert!(decode_block(&bytes).is_err());
+    }
+
+    #[test]
+    fn block_size_counter_stops_before_exceeding_cap() {
+        let mut counter = CappedCounter {
+            count: 0,
+            maximum: 4,
+        };
+        counter.write_all(&[1, 2, 3, 4]).unwrap();
+        assert!(counter.write_all(&[5]).is_err());
+        assert_eq!(counter.count, 4);
     }
 }

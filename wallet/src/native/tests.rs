@@ -116,23 +116,23 @@ mod tests {
             utxos: vec![
                 AccountUtxo {
                     id: "available-one".into(),
-                    amount: 2 * XPQ::ZENO_PER_COIN,
+                    amount: 2 * CoinShare::ZENO_PER_COIN,
                     reserved: false,
                 },
                 AccountUtxo {
                     id: "available-two".into(),
-                    amount: 3 * XPQ::ZENO_PER_COIN,
+                    amount: 3 * CoinShare::ZENO_PER_COIN,
                     reserved: false,
                 },
                 AccountUtxo {
                     id: "reserved".into(),
-                    amount: XPQ::ZENO_PER_COIN,
+                    amount: CoinShare::ZENO_PER_COIN,
                     reserved: true,
                 },
             ],
         };
 
-        assert_eq!(format_amount(2 * XPQ::ZENO_PER_COIN + 1), "2.00000001 XPQ");
+        assert_eq!(format_amount(2 * CoinShare::ZENO_PER_COIN + 1), "2.00000001 XPQ");
         assert_eq!(utxo_status(&account.utxos[0]), "available");
         assert_eq!(utxo_status(&account.utxos[1]), "available");
         assert_eq!(utxo_status(&account.utxos[2]), "reserved");

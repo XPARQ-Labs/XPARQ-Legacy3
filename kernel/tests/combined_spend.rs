@@ -193,12 +193,10 @@ impl TransactionStateView for State {
 fn signed(intent: SpendIntent, seed: &SigningSeed, chain: ChainContext) -> AuthorizedTransaction {
     let commitment = intent.principal_commitment(chain).unwrap();
     AuthorizedTransaction::Spend(Box::new(AuthorizedAccountIntent {
-        spend: AuthorizedAccountIntent {
-            intent,
-            authorization: AccountAuthorization {
-                public_key: seed.public_key(),
-                signature: seed.sign(commitment.as_bytes()),
-            },
+        intent,
+        authorization: AccountAuthorization {
+            public_key: seed.public_key(),
+            signature: seed.sign(commitment.as_bytes()),
         },
     }))
 }

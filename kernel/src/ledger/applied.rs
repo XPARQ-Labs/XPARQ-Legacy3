@@ -639,18 +639,33 @@ impl LedgerState {
         &mut self,
         journal: SpendRollbackJournal,
     ) -> Result<(), StateError> {
-        self.coin.total_mined = self
+        let total_mined = self
             .coin
             .total_mined
             .checked_sub(journal.mined)
             .ok_or(StateError::AmountOverflow)?;
 
-        self.coin.total_burned = self
+        let total_burned = self
             .coin
             .total_burned
             .checked_sub(journal.burned)
             .ok_or(StateError::BurnUnderflow)?;
 
+        let mut created = std::collections::BTreeSet::new();
+        for id in &journal.created_coin_ids {
+            if !created.insert(*id) || self.utxos.coin(id).is_none() {
+                return Err(StateError::InvalidTransaction);
+            }
+        }
+        let mut consumed = std::collections::BTreeSet::new();
+        for (id, _) in &journal.consumed_coins {
+            if !consumed.insert(*id) || (self.utxos.coin(id).is_some() && !created.contains(id)) {
+                return Err(StateError::InvalidTransaction);
+            }
+        }
+
+        self.coin.total_mined = total_mined;
+        self.coin.total_burned = total_burned;
         for id in journal.created_coin_ids {
             self.utxos.consume_coin(&id)?;
         }
@@ -703,6 +718,10 @@ impl AssetState {
         utxos: &mut utxo::UtxoSet,
         journal: AssetRollbackJournal,
     ) -> Result<(), StateError> {
+        let mut seen = std::collections::BTreeSet::new();
+        if journal.utxos.iter().any(|(id, _)| !seen.insert(*id)) {
+            return Err(StateError::Asset(AssetError::InvalidProgram));
+        }
         restore_map(&mut self.assets, journal.assets);
 
         for (id, previous) in journal.utxos.into_iter().rev() {
@@ -975,6 +994,17 @@ mod phase2_failure_injection_tests {
     fn asset_transfer_failure_after_input_or_output_restores_state() {
         let (original_state, original_utxos, _, asset, input) = asset_fixture();
         let outputs = [AssetOutput::new(address(2), Unit::from_units(10))];
+        let mut expected_state = original_state.clone();
+        let mut expected_utxos = original_utxos.clone();
+        expected_state
+            .apply_account_transfer(
+                &mut expected_utxos,
+                asset,
+                &[input],
+                &outputs,
+                [8; HASH_SIZE],
+            )
+            .unwrap();
         for point in [
             TransitionPoint::AssetInputConsumed,
             TransitionPoint::AssetOutputCreated,
@@ -997,10 +1027,47 @@ mod phase2_failure_injection_tests {
                 Err(AssetError::InvalidProgram)
             );
             assert_eq!(
-                (state, utxos),
+                (state.clone(), utxos.clone()),
                 (original_state.clone(), original_utxos.clone())
             );
+            state
+                .apply_account_transfer(&mut utxos, asset, &[input], &outputs, [8; HASH_SIZE])
+                .unwrap();
+            assert_eq!(
+                (state, utxos),
+                (expected_state.clone(), expected_utxos.clone())
+            );
         }
+    }
+
+    #[test]
+    fn burn_accounting_and_invalid_rollback_journal_fail_without_partial_mutation() {
+        let mut state = LedgerState::default();
+        let mut journal = SpendRollbackJournal {
+            burned: Zeno::from_zeno(u64::MAX),
+            ..SpendRollbackJournal::default()
+        };
+        assert!(matches!(
+            state.record_protocol_burn(Zeno::ONE, &mut journal),
+            Err(StateError::BurnOverflow)
+        ));
+        assert_eq!(state.coin.total_burned, Zeno::ZERO);
+        assert_eq!(journal.burned, Zeno::from_zeno(u64::MAX));
+
+        state.coin.total_mined = Zeno::from_zeno(100);
+        state.coin.total_burned = Zeno::from_zeno(5);
+        let before = state.clone();
+        let corrupt = SpendRollbackJournal {
+            created_coin_ids: vec![CoinShare::from_bytes([9; crypto::HASH16_SIZE])],
+            mined: Zeno::from_zeno(10),
+            burned: Zeno::ONE,
+            ..SpendRollbackJournal::default()
+        };
+        assert!(matches!(
+            state.rollback_spend(corrupt),
+            Err(StateError::InvalidTransaction)
+        ));
+        assert_eq!(state, before);
     }
 }
 

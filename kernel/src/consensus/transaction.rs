@@ -14,7 +14,8 @@ use crate::{
     },
     transaction::{
         AssetInstruction, AssetIntent, AuthorizedAccountIntent, AuthorizedTransaction, IntentError,
-        Spend, SpendIntent, SpendIntentCommitment, Transaction as OnChainTransaction,
+        MAX_TRANSACTION_SIZE, Spend, SpendIntent, SpendIntentCommitment,
+        Transaction as OnChainTransaction,
     },
 };
 
@@ -145,14 +146,19 @@ pub fn validate_transaction(
     //
     // Verify each transaction's complete authorization before state checks.
     //
-    validate_authorization_gate(&transaction, chain, current_height)?;
+    transaction
+        .validate_structure()
+        .map_err(TransactionConsensusError::Intent)?;
+    let transaction_size = canonical_bytes(&transaction)
+        .map_err(|_| TransactionConsensusError::Encoding)?
+        .len();
+    if transaction_size > MAX_TRANSACTION_SIZE {
+        return Err(TransactionConsensusError::TransactionTooLarge);
+    }
+    let canonical_transaction_weight = u64::try_from(transaction_size)
+        .map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))?;
 
-    let canonical_transaction_weight = u64::try_from(
-        canonical_bytes(&transaction)
-            .map_err(|_| TransactionConsensusError::Encoding)?
-            .len(),
-    )
-    .map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))?;
+    validate_authorization_gate(&transaction, chain, current_height)?;
 
     validate_authorized_transaction(transaction, chain, canonical_transaction_weight, state)
 }
@@ -459,6 +465,7 @@ fn ensure_unique_coin_ids(
 #[derive(Debug)]
 pub enum TransactionConsensusError {
     Encoding,
+    TransactionTooLarge,
     Intent(IntentError),
     InvalidAuthorization,
     SignatureSchemeInactive,
@@ -475,6 +482,9 @@ impl fmt::Display for TransactionConsensusError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Encoding => formatter.write_str("transaction encoding failed"),
+            Self::TransactionTooLarge => {
+                formatter.write_str("transaction exceeds consensus size limit")
+            }
             Self::Intent(error) => write!(formatter, "invalid transaction intent: {error}"),
             Self::InvalidAuthorization => {
                 formatter.write_str("transaction authorization is invalid")
@@ -517,7 +527,7 @@ mod p3e_authorization_gate_tests {
 
     use crate::{
         monetary::{
-            asset::Unit,
+            asset::{AssetContract, AssetOutput, Share, Unit},
             coin::{CoinOutput, Zeno},
         },
         transaction::{
@@ -611,6 +621,35 @@ mod p3e_authorization_gate_tests {
             AuthorizedTransaction::Spend(Box::new(authorize_principal(intent, &owner, chain)));
 
         assert!(validate_authorization_gate(&transaction, chain, TEST_HEIGHT).is_ok());
+    }
+
+    #[test]
+    fn oversized_transaction_is_rejected_before_signature_verification() {
+        struct EmptyState;
+        impl TransactionStateView for EmptyState {
+            fn coin(&self, _: CoinShare) -> Option<CoinInputState> {
+                None
+            }
+        }
+
+        let owner = seed(42);
+        let chain = chain(42);
+        let mut authorized = authorize_principal(coin_intent(&owner, 1, 1), &owner, chain);
+        let address = signer(&owner);
+        authorized.intent = SpendIntent::combined(
+            address,
+            vec![CoinShare::from_bytes([1; HASH16_SIZE])],
+            vec![CoinOutput::new(address, Zeno::from_zeno(1)); 4096],
+            AssetContract::from_bytes([2; HASH_SIZE]),
+            vec![Share::from_bytes([3; HASH16_SIZE])],
+            vec![AssetOutput::new(address, Unit::from_units(1)); 4096],
+        )
+        .unwrap();
+        let transaction = AuthorizedTransaction::Spend(Box::new(authorized));
+        assert!(matches!(
+            validate_transaction(transaction, chain, TEST_HEIGHT, &EmptyState),
+            Err(TransactionConsensusError::TransactionTooLarge)
+        ));
     }
 
     #[test]

@@ -37,7 +37,7 @@ use kernel::{
 
 const NODE_ID_FILE: &str = "node-id";
 const MAX_STORED_BLOCK_SIZE: usize = kernel::block::MAX_BLOCK_SIZE + 1024;
-const MAX_STORED_TRANSACTION_SIZE: usize = kernel::block::MAX_BLOCK_SIZE;
+const MAX_STORED_TRANSACTION_SIZE: usize = kernel::transaction::MAX_TRANSACTION_SIZE;
 const MAX_STORED_MEMPOOL_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_RPC_HEADER_SIZE: usize = 16 * 1024;
 const MAX_RPC_CONNECTIONS: usize = 8;

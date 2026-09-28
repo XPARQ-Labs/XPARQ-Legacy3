@@ -351,7 +351,7 @@ pub(super) fn serve_block_requests(
     let mut relayed_blocks = 0_usize;
     let mut transaction_requests = 0_usize;
     loop {
-        let request = read_frame(stream, 1 + MAX_STORED_BLOCK_SIZE)?;
+        let request = read_block_session_frame(stream)?;
         let (&message, body) = request.split_first().ok_or("empty block request")?;
         match message {
             SYNC_COMPLETE_MESSAGE if body.is_empty() => return Ok(PeerSessionOutcome::Complete),

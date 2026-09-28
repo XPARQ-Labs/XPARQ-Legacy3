@@ -10,7 +10,7 @@ use std::{
 
 use kernel::{
     crypto::{Signature, SigningSeed, address_from_public_key, address_to_string, canonical_bytes},
-    native::coin::{CoinOutput, XPQ, Zeno},
+    monetary::coin::{CoinOutput, CoinShare, Zeno},
     transaction::{AuthorizedTransaction, SpendIntent, Transaction},
 };
 use serde_json::Value;
@@ -316,7 +316,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let input = available
         .first()
         .expect("available miner reward is missing");
-    let input_id: XPQ = input["id"].as_str().unwrap().parse().unwrap();
+    let input_id: CoinShare = input["id"].as_str().unwrap().parse().unwrap();
     let input_amount = input["amount"].as_u64().unwrap();
     let sent = Zeno::from_zeno(1);
     let state_burn = kernel::consensus::StateTransitionWeight {

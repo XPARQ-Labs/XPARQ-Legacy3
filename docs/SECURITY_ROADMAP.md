@@ -47,7 +47,9 @@ against the state roots already committed in block headers.
 wrong parent state, and failed reorganization. The canonical ledger and
 persisted chain remain unchanged after each failure.
 
-## Phase 2 — Prove failure atomicity
+## Phase 2 — Prove failure atomicity [DONE]
+
+**Status: implemented and verified for current transition paths.**
 
 Inject controlled failures after input consumption, output creation, fee and
 burn updates, asset register/mint/burn changes, emission creation, snapshot
@@ -60,7 +62,24 @@ error they must either roll back fully or remain inside discarded staged state.
 **Acceptance:** Every injected failure leaves canonical state unchanged. A
 successful retry produces the same state root as uninterrupted execution.
 
-## Phase 3 — Bound consensus and decoding work
+## Phase 3 — Bound consensus and decoding work [DONE]
+
+**Status: implemented and tested for current transaction and block paths.**
+Consensus caps each serialized transaction at 256 KiB, each
+transaction input/output/share list at 4096 items, and a block at 4096
+transactions. Borsh decoding rejects oversized list prefixes before reading
+their elements. Block decoding also limits bytes read for each transaction,
+and in-memory block validation counts serialized bytes with a capped writer
+instead of allocating an unbounded block buffer.
+Direct kernel validation checks the same limits before
+signature verification. Node RPC, relay, and stored mempool transactions use
+the transaction byte limit. These consensus changes are reflected in chain
+spec version 2 and require a fresh compatible chain/storage.
+
+Malformed list prefixes, block replay bytes, oversized direct transactions,
+RPC lengths, and P2P frame lengths have focused regression tests. In a local
+run, these rejection tests each completed within 0.1 s and the test processes
+peaked near 11 MiB RSS; these are observations, not consensus thresholds.
 
 Audit transaction bytes, input and output counts, asset share counts, block
 transaction counts, and vector lengths during decoding. Apply bounds before

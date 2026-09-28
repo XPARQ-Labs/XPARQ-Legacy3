@@ -1,13 +1,15 @@
 use borsh::{BorshDeserialize, BorshSerialize};
+use std::io::{Error, ErrorKind, Read};
 
 use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 
+use super::{MAX_TRANSACTION_ITEMS, deserialize_bounded_vec};
 use crate::monetary::asset::{
-    AssetContract, AssetError, AssetShare, Metadata, Share, Unit, ensure_nonzero_asset_amount,
-    ensure_unique_asset_inputs,
+    ASSET_NAME_MAX_LEN, AssetContract, AssetError, AssetShare, Metadata, Share, Unit,
+    ensure_nonzero_asset_amount, ensure_unique_asset_inputs,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub enum AssetInstruction {
     Register {
         name: String,
@@ -28,6 +30,48 @@ pub enum AssetInstruction {
         amount: Unit,
         output: Unit,
     },
+}
+
+impl BorshDeserialize for AssetInstruction {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        match u8::deserialize_reader(reader)? {
+            0 => {
+                let length = u32::deserialize_reader(reader)? as usize;
+                if length > ASSET_NAME_MAX_LEN {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "asset name exceeds limit",
+                    ));
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes)?;
+                Ok(Self::Register {
+                    name: String::from_utf8(bytes)
+                        .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid asset name"))?,
+                    max_supply: Unit::deserialize_reader(reader)?,
+                    initial_mint: Unit::deserialize_reader(reader)?,
+                    mint_authority: Address::deserialize_reader(reader)?,
+                    nonce: u64::deserialize_reader(reader)?,
+                })
+            }
+            1 => Ok(Self::Mint {
+                asset: AssetContract::deserialize_reader(reader)?,
+                nonce: u64::deserialize_reader(reader)?,
+                recipient: Address::deserialize_reader(reader)?,
+                amount: Unit::deserialize_reader(reader)?,
+            }),
+            2 => Ok(Self::Burn {
+                asset: AssetContract::deserialize_reader(reader)?,
+                inputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
+                amount: Unit::deserialize_reader(reader)?,
+                output: Unit::deserialize_reader(reader)?,
+            }),
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                "invalid asset instruction",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -102,6 +146,9 @@ impl AssetIntent {
                 ensure_nonzero_asset_amount(*amount)?;
             }
             AssetInstruction::Burn { inputs, amount, .. } => {
+                if inputs.len() > MAX_TRANSACTION_ITEMS {
+                    return Err(AssetError::InvalidProgram);
+                }
                 if inputs.is_empty() {
                     return Err(AssetError::InvalidProgram);
                 }

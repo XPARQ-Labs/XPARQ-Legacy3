@@ -14,15 +14,48 @@ pub(super) fn read_frame(stream: &mut TcpStream, maximum: usize) -> Result<Vec<u
     stream
         .read_exact(&mut length)
         .map_err(|error| format!("read P2P frame length: {error}"))?;
-    let length = u32::from_le_bytes(length) as usize;
-    if length == 0 || length > maximum {
-        return Err("P2P frame size is outside allowed range".into());
-    }
+    let length = validate_frame_length(u32::from_le_bytes(length) as usize, maximum)?;
     let mut bytes = vec![0_u8; length];
     stream
         .read_exact(&mut bytes)
         .map_err(|error| format!("read P2P frame: {error}"))?;
     Ok(bytes)
+}
+
+pub(super) fn read_block_session_frame(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    let mut length = [0_u8; 4];
+    stream
+        .read_exact(&mut length)
+        .map_err(|error| format!("read P2P frame length: {error}"))?;
+    let length = validate_frame_length(
+        u32::from_le_bytes(length) as usize,
+        1 + MAX_STORED_BLOCK_SIZE,
+    )?;
+    let mut tag = [0_u8; 1];
+    stream
+        .read_exact(&mut tag)
+        .map_err(|error| format!("read P2P frame tag: {error}"))?;
+    validate_session_frame_length(length, tag[0])?;
+    let mut bytes = vec![0_u8; length];
+    bytes[0] = tag[0];
+    stream
+        .read_exact(&mut bytes[1..])
+        .map_err(|error| format!("read P2P frame: {error}"))?;
+    Ok(bytes)
+}
+
+pub(super) fn validate_session_frame_length(length: usize, tag: u8) -> Result<(), String> {
+    if tag == SUBMIT_TRANSACTION_MESSAGE {
+        validate_frame_length(length, 1 + MAX_STORED_TRANSACTION_SIZE)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_frame_length(length: usize, maximum: usize) -> Result<usize, String> {
+    if length == 0 || length > maximum {
+        return Err("P2P frame size is outside allowed range".into());
+    }
+    Ok(length)
 }
 
 pub(super) fn exchange_handshake(

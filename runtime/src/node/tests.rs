@@ -1,9 +1,9 @@
+use super::mining::{MiningAttempt, mine_block_database};
 use super::*;
 use super::{
     chain_sync::*, explorer::*, gossip::*, index::*, mempool::*, protocol::*, rpc::*, state::*,
     util::*,
 };
-use super::mining::{MiningAttempt, mine_block_database};
 
 #[test]
 fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
@@ -453,6 +453,110 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
         load_existing(&database).unwrap().tip_hash(),
         Some(original_tip)
     );
+}
+
+#[test]
+fn failed_reorg_after_applying_alternative_block_keeps_database_and_cache() {
+    let database = test_database("failed-reorg-after-apply");
+    let _ = load_or_initialize_owned(&database).expect("initialize genesis");
+    let mut memory = new_pow_memory();
+    assert!(matches!(
+        mine_block_database(
+            &database,
+            Address([0xb1; kernel::crypto::ADDRESS_SIZE]),
+            0,
+            100,
+            &mut memory,
+        )
+        .unwrap(),
+        MiningAttempt::Mined
+    ));
+    let stored_before = crate::storage::read_blocks(&database).unwrap();
+    let canonical_before = load_or_initialize_owned(&database).unwrap();
+    let original_tip = canonical_before.tip_hash();
+    let original_root = canonical_before.state_root().unwrap();
+
+    let mut alternative = kernel::genesis::genesis_ledger().unwrap();
+    let miner = Address([0xb2; kernel::crypto::ADDRESS_SIZE]);
+    let mut first = Block::from_protocol_transactions(
+        Height(1),
+        alternative.tip_hash().unwrap(),
+        expected_next_difficulty(&alternative.chain).unwrap(),
+        Nonce(0),
+        Some(Emission::new(
+            miner,
+            expected_emission_for_height(Height(1)),
+        )),
+        vec![],
+    )
+    .unwrap();
+    let (first_root, first_weight) = alternative.preview_block_commitments(&first).unwrap();
+    first.set_state_root(first_root);
+    first.set_block_weight(first_weight);
+    assert!(
+        crate::miner::mine_range(
+            &mut first,
+            crate::miner::MiningRange {
+                start_nonce: 0,
+                attempts: 100
+            },
+            &mut memory,
+        )
+        .unwrap()
+        .is_some()
+    );
+    kernel::consensus::apply_block(&mut alternative, first.clone()).unwrap();
+
+    let mut second = Block::from_protocol_transactions(
+        Height(2),
+        alternative.tip_hash().unwrap(),
+        expected_next_difficulty(&alternative.chain).unwrap(),
+        Nonce(0),
+        Some(Emission::new(
+            miner,
+            expected_emission_for_height(Height(2)),
+        )),
+        vec![],
+    )
+    .unwrap();
+    let (correct_root, second_weight) = alternative.preview_block_commitments(&second).unwrap();
+    assert_ne!(correct_root, kernel::crypto::StateRoot::ZERO);
+    second.set_state_root(kernel::crypto::StateRoot::ZERO);
+    second.set_block_weight(second_weight);
+    assert!(
+        crate::miner::mine_range(
+            &mut second,
+            crate::miner::MiningRange {
+                start_nonce: 0,
+                attempts: 100
+            },
+            &mut memory,
+        )
+        .unwrap()
+        .is_some()
+    );
+    let sync = HeaderSyncResult {
+        ancestor_height: Height(0),
+        ancestor_hash: kernel::genesis::genesis_block().unwrap().hash().unwrap(),
+        headers: vec![
+            kernel::consensus::HeaderAtHeight::new(Height(1), first.header.clone()),
+            kernel::consensus::HeaderAtHeight::new(Height(2), second.header.clone()),
+        ],
+        peer_work: Work::MAX,
+        peer_weight: u64::MAX,
+        preferred: true,
+    };
+    let error = apply_verified_branch(&database, sync, vec![first, second])
+        .expect_err("second alternative block has an invalid state root");
+    assert!(error.contains("state root"), "{error}");
+    assert_eq!(
+        crate::storage::read_blocks(&database).unwrap(),
+        stored_before
+    );
+    let cached = load_or_initialize_owned(&database).unwrap();
+    assert_eq!(cached.tip_hash(), original_tip);
+    assert_eq!(cached.state_root().unwrap(), original_root);
+    assert_eq!(load_existing(&database).unwrap().tip_hash(), original_tip);
 }
 
 fn append_synthetic_header_block(ledger: &mut Ledger, miner: Address) {
@@ -1237,6 +1341,24 @@ fn rpc_request_reader_rejects_ambiguous_or_oversized_framing() {
     );
     let oversized = read_test_http_request(&[oversized.as_bytes()]).unwrap_err();
     assert!(oversized.contains("exceeds transaction size limit"));
+}
+
+#[test]
+fn p2p_transaction_frame_rejects_oversized_length_before_body() {
+    let error = validate_frame_length(
+        MAX_STORED_TRANSACTION_SIZE + 2,
+        MAX_STORED_TRANSACTION_SIZE + 1,
+    )
+    .unwrap_err();
+    assert!(error.contains("outside allowed range"));
+    assert!(
+        validate_session_frame_length(MAX_STORED_TRANSACTION_SIZE + 2, SUBMIT_TRANSACTION_MESSAGE,)
+            .is_err()
+    );
+    assert!(
+        validate_session_frame_length(MAX_STORED_TRANSACTION_SIZE + 2, SUBMIT_BLOCK_MESSAGE,)
+            .is_ok()
+    );
 }
 
 #[test]
