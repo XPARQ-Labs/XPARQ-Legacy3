@@ -287,16 +287,20 @@ mod tests {
         let directory = test_directory("state-root");
         fs::create_dir_all(&directory).unwrap();
         let genesis = genesis_block().unwrap();
-        let mut ledger = Ledger::new();
-        apply_genesis(&mut ledger, genesis.clone(), EXPECTED_GENESIS_HASH).unwrap();
-        ledger.state.coin.total_mined = kernel::monetary::coin::Zeno::from_zeno(1);
+        let mut canonical = Ledger::new();
+        apply_genesis(&mut canonical, genesis.clone(), EXPECTED_GENESIS_HASH).unwrap();
+        let canonical_bytes = borsh::to_vec(&canonical).unwrap();
+        let mut altered = canonical.clone();
+        altered.state.coin.total_mined = kernel::monetary::coin::Zeno::from_zeno(1);
+        altered.state.coin.total_burned = kernel::monetary::coin::Zeno::from_zeno(1);
 
-        write(&directory, &ledger).unwrap();
+        write(&directory, &altered).unwrap();
         assert!(
             load(&directory, &[genesis])
                 .unwrap_err()
                 .contains("state root")
         );
+        assert_eq!(borsh::to_vec(&canonical).unwrap(), canonical_bytes);
 
         fs::remove_dir_all(directory).unwrap();
     }

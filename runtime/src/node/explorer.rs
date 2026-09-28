@@ -308,9 +308,9 @@ pub(super) fn address_transaction_activity(
             )
         }
         AuthorizedTransaction::Asset(tx) => (
-            Some(tx.payment.intent.signer),
-            coin_outputs_with_charges(&tx.payment.intent, miner),
-            coin_burn(&tx.payment.intent),
+            Some(tx.payment.signer),
+            coin_outputs_with_charges(&tx.payment, miner),
+            coin_burn(&tx.payment),
         ),
     };
     let received = checked_output_sum(
@@ -472,7 +472,7 @@ pub(super) fn asset_transaction_response(
     transaction: &kernel::transaction::AuthorizedAssetTransaction,
     protocol_burn: Zeno,
 ) -> serde_json::Value {
-    let call = &transaction.call.intent;
+    let call = &transaction.call;
     let instruction = match &call.instruction {
         kernel::transaction::AssetInstruction::Register {
             name,
@@ -500,9 +500,9 @@ pub(super) fn asset_transaction_response(
         "asset": call.asset().map(|id| id.to_string()).unwrap_or_else(|_| "invalid".into()),
         "signer": kernel::crypto::address_to_string(&call.signer),
         "asset_instruction": instruction,
-        "payment_sender": kernel::crypto::address_to_string(&transaction.payment.intent.signer),
-        "payment_outputs": public_outputs_response(&coin_outputs(&transaction.payment.intent), Some(transaction.payment.intent.signer)),
-        "miner_fee": transaction.payment.intent.charges.miner_fee.as_zeno(),
+        "payment_sender": kernel::crypto::address_to_string(&transaction.payment.signer),
+        "payment_outputs": public_outputs_response(&coin_outputs(&transaction.payment), Some(transaction.payment.signer)),
+        "miner_fee": transaction.payment.charges.miner_fee.as_zeno(),
         "protocol_burn": protocol_burn.as_zeno(),
     })
 }

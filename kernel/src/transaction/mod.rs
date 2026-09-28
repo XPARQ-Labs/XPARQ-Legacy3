@@ -7,7 +7,7 @@ pub use asset::{AssetInstruction, AssetIntent};
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizationCommitment, AuthorizationRole,
     AuthorizedAccountIntent, AuthorizedAssetTransaction, AuthorizedTransaction, IntentId,
-    TransactionId, payment_commitment,
+    TransactionId, asset_call_commitment,
 };
 pub use spend::{Spend, SpendCharges, SpendIntent, SpendIntentCommitment};
 

@@ -52,8 +52,8 @@ fn transaction_addresses(
         }
 
         AuthorizedTransaction::Asset(transaction) => (
-            transaction.payment.intent.signer,
-            explorer::coin_outputs_with_charges(&transaction.payment.intent, miner),
+            transaction.payment.signer,
+            explorer::coin_outputs_with_charges(&transaction.payment, miner),
         ),
     };
 

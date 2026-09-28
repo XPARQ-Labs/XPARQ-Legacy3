@@ -416,7 +416,7 @@ mod p3e_replay_tests {
 
     use crate::{
         common::ChainContext,
-        monetary::coin::{CoinOutput, XPQ, Zeno},
+        monetary::coin::{CoinOutput, CoinShare, Zeno},
         transaction::{
             AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedTransaction,
             SpendIntent,
@@ -431,13 +431,13 @@ mod p3e_replay_tests {
 
         let intent = SpendIntent::coin(
             signer,
-            vec![XPQ::from_bytes([0x31; crypto::HASH16_SIZE])],
+            vec![CoinShare::from_bytes([0x31; crypto::HASH16_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(1))],
         )
         .expect("valid structural spend fixture");
 
         let commitment = intent
-            .authorization_commitment(chain)
+            .principal_commitment(chain)
             .expect("authorization commitment");
 
         AuthorizedTransaction::Spend(Box::new(AuthorizedAccountIntent {

@@ -11,10 +11,7 @@ use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight},
     crypto::{Address, Signature, address_from_string},
-    transaction::{
-        AssetInstruction, AuthorizedAssetTransaction, AuthorizedTransaction, SpendCharges,
-        SpendIntent,
-    },
+    transaction::{AssetInstruction, AuthorizedTransaction, SpendCharges, SpendIntent},
 };
 use serde::Deserialize;
 use wallet::{

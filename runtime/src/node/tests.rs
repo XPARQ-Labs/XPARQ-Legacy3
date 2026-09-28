@@ -3,6 +3,7 @@ use super::{
     chain_sync::*, explorer::*, gossip::*, index::*, mempool::*, protocol::*, rpc::*, state::*,
     util::*,
 };
+use super::mining::{MiningAttempt, mine_block_database};
 
 #[test]
 fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
@@ -46,45 +47,37 @@ fn asset_transaction_projection_exposes_asset_and_action() {
     let asset_call = kernel::transaction::AssetIntent::new(
         kernel::transaction::AssetInstruction::Register {
             name: "Test Token".into(),
-            decimals: 8,
-            max_supply: kernel::native::asset::Unit::from_units(100_000_000_000_000_000_000_000),
-            initial_mint: kernel::native::asset::Unit::from_units(1_000_000),
+            max_supply: kernel::monetary::asset::Unit::from_units(100_000_000_000_000_000_000_000),
+            initial_mint: kernel::monetary::asset::Unit::from_units(1_000_000),
             mint_authority: signer,
             nonce: 0,
         },
         signer,
     );
-    let signature = seed.sign(&asset_call.commitment(chain.genesis_hash).unwrap());
     let asset = asset_call.asset().unwrap().to_string();
+    let payment = kernel::transaction::SpendIntent::coin_with_charges(
+        signer,
+        vec![kernel::monetary::coin::CoinShare::from_bytes(
+            [1; kernel::crypto::HASH16_SIZE],
+        )],
+        vec![],
+        kernel::transaction::SpendCharges::new(Zeno::ONE),
+    )
+    .unwrap();
+    let commitment =
+        kernel::transaction::asset_call_commitment(&asset_call, &payment, chain).unwrap();
     let transaction = kernel::transaction::AuthorizedAssetTransaction {
-        call: kernel::transaction::AuthorizedAccountIntent {
-            intent: asset_call,
-            authorization: kernel::transaction::AccountAuthorization {
-                public_key,
-                signature,
-            },
-        },
-        payment: kernel::transaction::AuthorizedAccountIntent {
-            intent: kernel::transaction::SpendIntent {
-                signer: Address::ZERO,
-                spend: kernel::transaction::Spend::Coin {
-                    inputs: vec![],
-                    outputs: vec![],
-                },
-            },
-            authorization: kernel::transaction::AccountAuthorization {
-                public_key: seed.public_key(),
-                signature: kernel::crypto::AccountSignature {
-                    account: kernel::crypto::Signature::MlDsa44,
-                    bytes: vec![],
-                },
-            },
+        call: asset_call,
+        payment,
+        authorization: kernel::transaction::AccountAuthorization {
+            public_key,
+            signature: seed.sign(commitment.as_bytes()),
         },
     };
     let response = asset_transaction_response(&transaction, Zeno::from_zeno(4_782));
     assert_eq!(response["asset"], asset);
     assert_eq!(response["asset_instruction"]["type"], "register");
-    assert_eq!(response["miner_fee"], 0);
+    assert_eq!(response["miner_fee"], 1);
     assert_eq!(response["protocol_burn"], 4_782);
     assert_eq!(
         response["asset_instruction"]["max_supply"],
@@ -100,9 +93,8 @@ fn account_projection_lists_asset_supply_and_creator_shares() {
     let call = kernel::transaction::AssetIntent::new(
         kernel::transaction::AssetInstruction::Register {
             name: "Authority Asset".into(),
-            decimals: 0,
-            max_supply: kernel::native::asset::Unit::from_units(10),
-            initial_mint: kernel::native::asset::Unit::from_units(4),
+            max_supply: kernel::monetary::asset::Unit::from_units(10),
+            initial_mint: kernel::monetary::asset::Unit::from_units(4),
             mint_authority: authority,
             nonce: 0,
         },
@@ -322,8 +314,8 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
     let miner = Address([5; kernel::crypto::ADDRESS_SIZE]);
     let intent = kernel::transaction::SpendIntent::coin(
         sender.address,
-        vec![kernel::native::coin::XPQ::from_bytes(
-            [6; kernel::native::coin::XPQ::SIZE],
+        vec![kernel::monetary::coin::CoinShare::from_bytes(
+            [6; kernel::monetary::coin::CoinShare::SIZE],
         )],
         vec![
             CoinOutput::new(recipient, Zeno::from_zeno(10)),
@@ -387,6 +379,80 @@ fn test_database(label: &str) -> PathBuf {
             .unwrap()
             .as_nanos()
     ))
+}
+
+#[test]
+fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
+    let database = test_database("failed-reorg-root");
+    let _ = load_or_initialize_owned(&database).expect("initialize genesis");
+    let miner = Address([0xa1; kernel::crypto::ADDRESS_SIZE]);
+    let mut memory = new_pow_memory();
+    assert!(matches!(
+        mine_block_database(&database, miner, 0, 100, &mut memory).unwrap(),
+        MiningAttempt::Mined
+    ));
+
+    let original_blocks = crate::storage::read_blocks(&database).unwrap();
+    let mut altered = load_or_initialize_owned(&database).unwrap();
+    let original_tip = altered.tip_hash().unwrap();
+    let (coin_id, coin) = altered.state.utxos.coins().next().expect("emission coin");
+    let mut coin = *coin;
+    coin.owner = Address([0xa2; kernel::crypto::ADDRESS_SIZE]);
+    altered.state.utxos.consume_coin(&coin_id).unwrap();
+    altered.state.utxos.insert_coin(coin_id, coin).unwrap();
+    assert!(altered.state.validate_supply_invariants().is_ok());
+    update_ledger_cache(&database, altered).unwrap();
+
+    let genesis = kernel::genesis::genesis_block().unwrap();
+    let genesis_hash = genesis.hash().unwrap();
+    let target_bits = expected_next_difficulty(&load_existing(&database).unwrap().chain).unwrap();
+    let alternative_one = Block::from_protocol_transactions(
+        Height(1),
+        genesis_hash,
+        target_bits,
+        Nonce(100),
+        Some(Emission::new(
+            miner,
+            expected_emission_for_height(Height(1)),
+        )),
+        vec![],
+    )
+    .unwrap();
+    let alternative_two = Block::from_protocol_transactions(
+        Height(2),
+        alternative_one.hash().unwrap(),
+        target_bits,
+        Nonce(101),
+        Some(Emission::new(
+            miner,
+            expected_emission_for_height(Height(2)),
+        )),
+        vec![],
+    )
+    .unwrap();
+    let sync = HeaderSyncResult {
+        ancestor_height: Height(0),
+        ancestor_hash: genesis_hash,
+        headers: vec![
+            kernel::consensus::HeaderAtHeight::new(Height(1), alternative_one.header.clone()),
+            kernel::consensus::HeaderAtHeight::new(Height(2), alternative_two.header.clone()),
+        ],
+        peer_work: Work::MAX,
+        peer_weight: u64::MAX,
+        preferred: true,
+    };
+
+    let error = apply_verified_branch(&database, sync, vec![alternative_one, alternative_two])
+        .expect_err("corrupt active state must abort reorg");
+    assert!(error.contains("active state root"), "{error}");
+    assert_eq!(
+        crate::storage::read_blocks(&database).unwrap(),
+        original_blocks
+    );
+    assert_eq!(
+        load_existing(&database).unwrap().tip_hash(),
+        Some(original_tip)
+    );
 }
 
 fn append_synthetic_header_block(ledger: &mut Ledger, miner: Address) {
@@ -538,8 +604,8 @@ fn explorer_tx_index_finds_canonical_transaction() {
 
     let intent = kernel::transaction::SpendIntent::coin(
         sender.address,
-        vec![kernel::native::coin::XPQ::from_bytes(
-            [0x34; kernel::native::coin::XPQ::SIZE],
+        vec![kernel::monetary::coin::CoinShare::from_bytes(
+            [0x34; kernel::monetary::coin::CoinShare::SIZE],
         )],
         vec![CoinOutput::new(recipient, Zeno::from_zeno(10))],
     )
@@ -677,8 +743,8 @@ fn explorer_index_extends_after_canonical_append() {
 
         let intent = kernel::transaction::SpendIntent::coin(
             sender.address,
-            vec![kernel::native::coin::XPQ::from_bytes(
-                [input_byte; kernel::native::coin::XPQ::SIZE],
+            vec![kernel::monetary::coin::CoinShare::from_bytes(
+                [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
             vec![CoinOutput::new(recipient, Zeno::from_zeno(10))],
         )
@@ -778,8 +844,8 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
 
         let intent = kernel::transaction::SpendIntent::coin(
             sender.address,
-            vec![kernel::native::coin::XPQ::from_bytes(
-                [input_byte; kernel::native::coin::XPQ::SIZE],
+            vec![kernel::monetary::coin::CoinShare::from_bytes(
+                [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
             vec![CoinOutput::new(recipient, Zeno::from_zeno(10))],
         )
@@ -888,8 +954,8 @@ fn explorer_address_index_rebuilds_after_reorg() {
 
         let intent = kernel::transaction::SpendIntent::coin(
             sender.address,
-            vec![kernel::native::coin::XPQ::from_bytes(
-                [input_byte; kernel::native::coin::XPQ::SIZE],
+            vec![kernel::monetary::coin::CoinShare::from_bytes(
+                [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
             vec![CoinOutput::new(recipient, Zeno::from_zeno(10))],
         )
@@ -1194,8 +1260,8 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
 
         let intent = kernel::transaction::SpendIntent::coin(
             sender.address,
-            vec![kernel::native::coin::XPQ::from_bytes(
-                [input_byte; kernel::native::coin::XPQ::SIZE],
+            vec![kernel::monetary::coin::CoinShare::from_bytes(
+                [input_byte; kernel::monetary::coin::CoinShare::SIZE],
             )],
             vec![CoinOutput::new(recipient, Zeno::from_zeno(10))],
         )

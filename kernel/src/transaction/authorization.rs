@@ -186,8 +186,9 @@ impl<T: AccountIntent> AuthorizedAccountIntent<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedAssetTransaction {
-    pub call: AuthorizedAccountIntent<AssetIntent>,
-    pub payment: AuthorizedAccountIntent<SpendIntent>,
+    pub call: AssetIntent,
+    pub payment: SpendIntent,
+    pub authorization: AccountAuthorization,
 }
 
 impl AuthorizedAssetTransaction {
@@ -196,17 +197,10 @@ impl AuthorizedAssetTransaction {
         chain: ChainContext,
         height: u64,
     ) -> Result<bool, IntentError> {
-        if !self.call.verify_principal(chain, height)? {
-            return Ok(false);
-        }
-
-        let commitment = payment_commitment(&self.call.intent, &self.payment.intent, chain)?;
-
-        Ok(self.payment.authorization.verify_commitment(
-            self.payment.intent.signer,
-            &commitment,
-            height,
-        ))
+        let commitment = asset_call_commitment(&self.call, &self.payment, chain)?;
+        Ok(self
+            .authorization
+            .verify_commitment(self.call.signer, &commitment, height))
     }
 }
 
@@ -247,8 +241,8 @@ impl AuthorizedTransaction {
             Self::Asset(tx) => canonical_bytes(&(
                 TRANSACTION_INTENT_ID_TAG,
                 INTENT_KIND_ASSET_CALL,
-                &tx.call.intent,
-                &tx.payment.intent,
+                &tx.call,
+                &tx.payment,
             )),
         }
         .map_err(|_| TransactionEncodingError::Encoding)?;
@@ -266,18 +260,7 @@ impl AuthorizedTransaction {
         match self {
             Self::Spend(tx) => tx.intent.validate(),
 
-            Self::Asset(tx) => {
-                tx.call
-                    .intent
-                    .validate_structure()
-                    .map_err(|_| IntentError::InvalidAssetCall)?;
-
-                if !matches!(&tx.payment.intent.spend, Spend::Coin { .. }) {
-                    return Err(IntentError::InvalidAssetCall);
-                }
-
-                tx.payment.intent.validate()
-            }
+            Self::Asset(tx) => asset_call_structure(&tx.call, &tx.payment),
         }
     }
 
@@ -296,31 +279,35 @@ impl AuthorizedTransaction {
     }
 }
 
-/// Payment authorization bound to its parent operation.
-///
-/// The serialized asset call is included so its XPQ payment cannot be reused.
-pub fn payment_commitment(
-    parent: &AssetIntent,
-    payment: &SpendIntent,
-    chain: ChainContext,
-) -> Result<AuthorizationCommitment, IntentError> {
+fn asset_call_structure(call: &AssetIntent, payment: &SpendIntent) -> Result<(), IntentError> {
+    call.validate_structure()
+        .map_err(|_| IntentError::InvalidAssetCall)?;
     payment.validate()?;
-
-    if !matches!(&payment.spend, Spend::Coin { .. }) {
+    if call.signer != payment.signer || !matches!(&payment.spend, Spend::Coin { .. }) {
         return Err(IntentError::InvalidAssetCall);
     }
 
-    let parent_bytes = canonical_bytes(parent).map_err(|_| IntentError::Encoding)?;
+    Ok(())
+}
+
+/// One signature authorizes the asset operation and its XPQ payment together.
+pub fn asset_call_commitment(
+    call: &AssetIntent,
+    payment: &SpendIntent,
+    chain: ChainContext,
+) -> Result<AuthorizationCommitment, IntentError> {
+    asset_call_structure(call, payment)?;
 
     let bytes = canonical_bytes(&(
         chain.genesis_hash,
-        AuthorizationRole::Payment,
-        parent_bytes,
+        AuthorizationRole::Principal,
+        b"xparq:asset-call-authorization:v1",
+        call,
         payment,
     ))
     .map_err(|_| IntentError::Encoding)?;
 
     Ok(AuthorizationCommitment::from_bytes(
-        domain(HashDomain::SpendIntent, &bytes).into_bytes(),
+        domain(HashDomain::AssetIntent, &bytes).into_bytes(),
     ))
 }

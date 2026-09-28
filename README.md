@@ -594,8 +594,9 @@ The canonical block log remains required for startup and reorganization.
 `wallet asset-transfer` now places the asset transfer and its XPQ fee payment in
 one signed spend. The same wallet must own both sets of inputs. To transfer XPQ
 to a recipient in that transaction as well, provide both `--coin-to ADDRESS`
-and `--coin-amount XPQ`. Asset registration, mint, and burn still use their
-separate asset-call authorization and XPQ payment authorization.
+and `--coin-amount XPQ`. Asset registration, mint, and burn use one signature
+for the asset operation and its XPQ payment. The same wallet owns the XPQ inputs
+and signs the asset call.
 The old two-authorization asset-transfer variant has been removed; only the
 combined spend format is accepted after the chain reset.
 

@@ -127,7 +127,6 @@ pub(super) fn reserved_coin_inputs(
                 .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
             AuthorizedTransaction::Asset(transaction) => transaction
                 .payment
-                .intent
                 .coin_parts()
                 .map_or_else(Vec::new, |(inputs, _)| inputs.to_vec()),
         })
@@ -189,7 +188,7 @@ pub(super) fn transaction_miner_fee(transaction: &Transaction) -> Result<u64, St
             Ok(transaction.intent.charges.miner_fee.as_zeno())
         }
         AuthorizedTransaction::Asset(transaction) => {
-            Ok(transaction.payment.intent.charges.miner_fee.as_zeno())
+            Ok(transaction.payment.charges.miner_fee.as_zeno())
         }
     }
 }

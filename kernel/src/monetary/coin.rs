@@ -262,7 +262,7 @@ fn different_emission_origins_create_different_shares() {
 
 #[test]
 fn different_output_indexes_create_different_shares() {
-    let commitment = [0x33; HASH16_SIZE];
+    let commitment = [0x33; HASH_SIZE];
 
     let a = CoinShare::from_output(&commitment, 0);
     let b = CoinShare::from_output(&commitment, 1);

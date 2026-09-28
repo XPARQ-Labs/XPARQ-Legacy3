@@ -12,7 +12,10 @@ use crate::{
         TransactionStateView, ValidatedBlock, validate_emission, validate_transaction,
     },
     ledger::{CoinUtxo, LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
-    monetary::coin::CoinShare,
+    monetary::{
+        asset::{AssetContract, Unit},
+        coin::{CoinShare, Zeno},
+    },
 };
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -38,6 +41,12 @@ struct ExecutedBlock {
     state_root: StateRoot,
     block_weight: u32,
     chain_context: crate::common::ChainContext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockTransitionPoint {
+    EmissionCreated,
+    TransactionApplied,
 }
 
 impl Ledger {
@@ -77,6 +86,7 @@ impl Ledger {
                 genesis.hash()?.into_bytes(),
             )),
         };
+        ledger.state.validate_supply_invariants()?;
         if ledger.state_root()? != tip.state_root() {
             return Err(LedgerError::InvalidStateRoot);
         }
@@ -131,6 +141,28 @@ impl Ledger {
     }
 
     fn execute_block(&self, block: &Block) -> Result<ExecutedBlock, LedgerError> {
+        self.execute_block_with_checkpoint(block, |_| Ok(()))
+    }
+
+    fn execute_block_with_checkpoint(
+        &self,
+        block: &Block,
+        mut checkpoint: impl FnMut(BlockTransitionPoint) -> Result<(), LedgerError>,
+    ) -> Result<ExecutedBlock, LedgerError> {
+        self.chain.validate_next_block(block)?;
+        match self.chain.tip_height() {
+            Some(height) => {
+                let tip = self.chain.block(&height).ok_or(LedgerError::EmptyChain)?;
+                if self.state_root()? != tip.state_root() {
+                    return Err(LedgerError::InvalidPriorStateRoot);
+                }
+            }
+            None if self.state_root()? != StateRoot::ZERO => {
+                return Err(LedgerError::InvalidPriorStateRoot);
+            }
+            None => {}
+        }
+
         let mut state = self.state.clone();
         let mut journals = Vec::new();
         let block_weight =
@@ -154,6 +186,7 @@ impl Ledger {
                     owner: emission.recipient(),
                 },
             )?;
+            checkpoint(BlockTransitionPoint::EmissionCreated)?;
             state.coin.total_mined = state
                 .coin
                 .total_mined
@@ -180,8 +213,10 @@ impl Ledger {
                 block.miner_address(),
                 chain_context,
             )?);
+            checkpoint(BlockTransitionPoint::TransactionApplied)?;
         }
 
+        state.validate_supply_invariants()?;
         let state_root = state.application_state_root()?;
         Ok(ExecutedBlock {
             state,
@@ -196,6 +231,10 @@ impl Ledger {
         let height = self.chain.tip_height().ok_or(LedgerError::EmptyChain)?;
 
         let hash = self.chain.tip_hash().ok_or(LedgerError::EmptyChain)?;
+        let tip = self.chain.block(&height).ok_or(LedgerError::EmptyChain)?;
+        if self.state_root()? != tip.state_root() {
+            return Err(LedgerError::InvalidPriorStateRoot);
+        }
 
         let journals = self
             .journals
@@ -213,6 +252,17 @@ impl Ledger {
 
         let block = staged_chain.remove_tip(hash)?;
 
+        staged_state.validate_supply_invariants()?;
+        let expected_root = match staged_chain.tip_height() {
+            Some(parent_height) => staged_chain
+                .block(&parent_height)
+                .ok_or(LedgerError::EmptyChain)?
+                .state_root(),
+            None => StateRoot::ZERO,
+        };
+        if staged_state.application_state_root()? != expected_root {
+            return Err(LedgerError::InvalidRollbackStateRoot);
+        }
         self.state = staged_state;
 
         self.chain = staged_chain;
@@ -311,6 +361,40 @@ impl TransactionStateView for LedgerState {
 //
 
 impl LedgerState {
+    /// Cross-check accounting records against independently stored live UTXOs.
+    pub fn validate_supply_invariants(&self) -> Result<(), LedgerError> {
+        let coin_total = self
+            .utxos
+            .coins()
+            .try_fold(Zeno::ZERO, |total, (_, coin)| {
+                total.checked_add(coin.amount)
+            })
+            .ok_or(LedgerError::SupplyOverflow)?;
+        if self.coin.supply() != Some(coin_total) {
+            return Err(LedgerError::CoinSupplyMismatch);
+        }
+
+        let mut asset_totals = BTreeMap::<AssetContract, Unit>::new();
+        for (_, share) in self.utxos.assets() {
+            if self.assets.record(share.asset).is_none() {
+                return Err(LedgerError::UnknownAssetShare);
+            }
+            let total = asset_totals.entry(share.asset).or_insert(Unit::ZERO);
+            *total = total
+                .checked_add(share.amount)
+                .ok_or(LedgerError::SupplyOverflow)?;
+        }
+        for (&asset, record) in &self.assets.assets {
+            if record.total_minted > record.metadata.max_supply
+                || record.total_minted.checked_sub(record.total_burned) != Some(record.supply)
+                || asset_totals.get(&asset).copied().unwrap_or(Unit::ZERO) != record.supply
+            {
+                return Err(LedgerError::AssetSupplyMismatch);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn application_state_root(&self) -> Result<StateRoot, LedgerError> {
         if self.assets.is_empty()
             && self.utxos.is_empty()
@@ -352,7 +436,19 @@ pub enum LedgerError {
 
     InvalidStateRoot,
 
+    InvalidPriorStateRoot,
+
+    InvalidRollbackStateRoot,
+
     InvalidBlockWeight,
+
+    SupplyOverflow,
+
+    CoinSupplyMismatch,
+
+    AssetSupplyMismatch,
+
+    UnknownAssetShare,
 }
 
 impl fmt::Display for LedgerError {
@@ -386,9 +482,29 @@ impl fmt::Display for LedgerError {
 
             Self::InvalidStateRoot => formatter.write_str("block state root does not match ledger"),
 
+            Self::InvalidPriorStateRoot => {
+                formatter.write_str("active state root does not match canonical tip")
+            }
+
+            Self::InvalidRollbackStateRoot => {
+                formatter.write_str("rolled-back state root does not match parent block")
+            }
+
             Self::InvalidBlockWeight => {
                 formatter.write_str("block execution weight does not match ledger")
             }
+
+            Self::SupplyOverflow => formatter.write_str("UTXO supply sum overflowed"),
+
+            Self::CoinSupplyMismatch => {
+                formatter.write_str("coin UTXO total does not match supply")
+            }
+
+            Self::AssetSupplyMismatch => {
+                formatter.write_str("asset share total does not match recorded supply")
+            }
+
+            Self::UnknownAssetShare => formatter.write_str("asset share has no registered asset"),
         }
     }
 }
@@ -581,6 +697,111 @@ mod p3e_block_atomicity_tests {
         assert_eq!(ledger.tip_height(), Some(Height(0)));
 
         assert_eq!(ledger_bytes(&ledger), before);
+    }
+
+    #[test]
+    fn tampered_active_state_rejects_next_block_and_rollback_without_mutation() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+        commit_empty_block(&mut ledger, crypto::Address([0x81; crypto::ADDRESS_SIZE]));
+        let (coin_id, coin) = ledger.state.utxos.coins().next().expect("emission coin");
+        let mut altered = *coin;
+        altered.owner = crypto::Address([0x82; crypto::ADDRESS_SIZE]);
+        ledger.state.utxos.consume_coin(&coin_id).unwrap();
+        ledger.state.utxos.insert_coin(coin_id, altered).unwrap();
+        assert!(ledger.state.validate_supply_invariants().is_ok());
+
+        let before = ledger_bytes(&ledger);
+        let next = empty_next_candidate(&ledger, crypto::Address([0x83; crypto::ADDRESS_SIZE]));
+        assert!(matches!(
+            ledger.preview_block_commitments(&next),
+            Err(LedgerError::InvalidPriorStateRoot)
+        ));
+        assert!(matches!(
+            ledger.rollback_tip(),
+            Err(LedgerError::InvalidPriorStateRoot)
+        ));
+        assert_eq!(ledger_bytes(&ledger), before);
+    }
+
+    #[test]
+    fn rollback_rejects_journal_that_preserves_supply_but_changes_parent_root() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+        commit_empty_block(&mut ledger, crypto::Address([0x84; crypto::ADDRESS_SIZE]));
+        let journal = &mut ledger
+            .journals
+            .get_mut(&Height(1))
+            .expect("height-one journal")[0]
+            .spend
+            .as_mut()
+            .expect("emission journal");
+        journal.mined = journal.mined.checked_sub(Zeno::ONE).unwrap();
+        journal.burned = journal.burned.checked_sub(Zeno::ONE).unwrap();
+
+        let before = ledger_bytes(&ledger);
+        assert!(matches!(
+            ledger.rollback_tip(),
+            Err(LedgerError::InvalidRollbackStateRoot)
+        ));
+        assert_eq!(ledger_bytes(&ledger), before);
+        assert_eq!(ledger.tip_height(), Some(Height(1)));
+    }
+
+    #[test]
+    fn rollback_to_non_genesis_parent_checks_parent_root() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+        commit_empty_block(&mut ledger, crypto::Address([0x85; crypto::ADDRESS_SIZE]));
+        commit_empty_block(&mut ledger, crypto::Address([0x86; crypto::ADDRESS_SIZE]));
+        let journal = &mut ledger
+            .journals
+            .get_mut(&Height(2))
+            .expect("height-two journal")[0]
+            .spend
+            .as_mut()
+            .expect("emission journal");
+        journal.mined = journal.mined.checked_sub(Zeno::ONE).unwrap();
+        journal.burned = journal.burned.checked_sub(Zeno::ONE).unwrap();
+
+        let before = ledger_bytes(&ledger);
+        assert!(matches!(
+            ledger.rollback_tip(),
+            Err(LedgerError::InvalidRollbackStateRoot)
+        ));
+        assert_eq!(ledger_bytes(&ledger), before);
+        assert_eq!(ledger.tip_height(), Some(Height(2)));
+    }
+
+    #[test]
+    fn rolling_back_genesis_restores_empty_state_root() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+        let genesis = ledger.chain.block(&Height(0)).unwrap().clone();
+        assert_eq!(ledger.rollback_tip().unwrap(), genesis);
+        assert_eq!(ledger.tip_height(), None);
+        assert_eq!(ledger.state_root().unwrap(), StateRoot::ZERO);
+    }
+
+    #[test]
+    fn failure_after_emission_creation_does_not_change_canonical_ledger() {
+        let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
+        let mut baseline = ledger.clone();
+        let miner = crypto::Address([0x91; crypto::ADDRESS_SIZE]);
+        let block = empty_next_candidate(&ledger, miner);
+        let before = ledger_bytes(&ledger);
+
+        assert!(matches!(
+            ledger.execute_block_with_checkpoint(&block, |point| {
+                if point == BlockTransitionPoint::EmissionCreated {
+                    Err(LedgerError::InvalidStateRoot)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(LedgerError::InvalidStateRoot)
+        ));
+        assert_eq!(ledger_bytes(&ledger), before);
+
+        commit_empty_block(&mut ledger, miner);
+        commit_empty_block(&mut baseline, miner);
+        assert_eq!(ledger_bytes(&ledger), ledger_bytes(&baseline));
     }
 
     #[test]

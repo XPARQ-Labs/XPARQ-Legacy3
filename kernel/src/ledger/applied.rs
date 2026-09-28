@@ -17,6 +17,17 @@ use crate::{
     transaction::{AssetInstruction, AssetIntent, SpendIntent, SpendIntentCommitment},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransitionPoint {
+    CoinInputConsumed,
+    CoinOutputCreated,
+    MinerFeeCreated,
+    ProtocolBurnRecorded,
+    AssetRecordUpdated,
+    AssetInputConsumed,
+    AssetOutputCreated,
+}
+
 //
 // Apply validated transaction
 //
@@ -109,6 +120,16 @@ impl LedgerState {
         commitment: SpendIntentCommitment,
         block_miner: Address,
     ) -> Result<SpendRollbackJournal, StateError> {
+        self.apply_onchain_spend_with_checkpoint(intent, commitment, block_miner, |_| Ok(()))
+    }
+
+    fn apply_onchain_spend_with_checkpoint(
+        &mut self,
+        intent: &SpendIntent,
+        commitment: SpendIntentCommitment,
+        block_miner: Address,
+        mut checkpoint: impl FnMut(TransitionPoint) -> Result<(), StateError>,
+    ) -> Result<SpendRollbackJournal, StateError> {
         let mut journal = SpendRollbackJournal::default();
 
         let result = (|| {
@@ -140,6 +161,7 @@ impl LedgerState {
             for id in inputs {
                 let coin = self.utxos.consume_coin(id)?;
                 journal.consumed_coins.push((*id, coin));
+                checkpoint(TransitionPoint::CoinInputConsumed)?;
             }
 
             //
@@ -164,6 +186,7 @@ impl LedgerState {
                 )?;
 
                 journal.created_coin_ids.push(id);
+                checkpoint(TransitionPoint::CoinOutputCreated)?;
             }
 
             if !intent.charges.miner_fee.is_zero() {
@@ -176,9 +199,11 @@ impl LedgerState {
                     },
                 )?;
                 journal.created_coin_ids.push(id);
+                checkpoint(TransitionPoint::MinerFeeCreated)?;
             }
 
             self.record_protocol_burn(burn, &mut journal)?;
+            checkpoint(TransitionPoint::ProtocolBurnRecorded)?;
 
             Ok(())
         })();
@@ -193,6 +218,16 @@ impl AssetState {
         utxos: &mut utxo::UtxoSet,
         call: &AssetIntent,
         genesis_hash: [u8; 32],
+    ) -> Result<AssetRollbackJournal, AssetError> {
+        self.apply_with_checkpoint(utxos, call, genesis_hash, |_| Ok(()))
+    }
+
+    fn apply_with_checkpoint(
+        &mut self,
+        utxos: &mut utxo::UtxoSet,
+        call: &AssetIntent,
+        genesis_hash: [u8; 32],
+        mut checkpoint: impl FnMut(TransitionPoint) -> Result<(), AssetError>,
     ) -> Result<AssetRollbackJournal, AssetError> {
         call.validate_structure()?;
 
@@ -217,132 +252,154 @@ impl AssetState {
 
         let mut journal = AssetRollbackJournal::default();
 
-        match &call.instruction {
-            AssetInstruction::Register {
-                name,
-                max_supply,
-                initial_mint,
-                mint_authority,
-                nonce,
-            } => {
-                let metadata =
-                    Metadata::new(name.clone(), *max_supply, call.signer, *mint_authority)?;
+        let result = (|| {
+            match &call.instruction {
+                AssetInstruction::Register {
+                    name,
+                    max_supply,
+                    initial_mint,
+                    mint_authority,
+                    nonce,
+                } => {
+                    let metadata =
+                        Metadata::new(name.clone(), *max_supply, call.signer, *mint_authority)?;
 
-                let asset = AssetContract::derive(&metadata, *nonce)?;
+                    let asset = AssetContract::derive(&metadata, *nonce)?;
 
-                let share = Share::derive(asset, commitment, 0);
+                    let share = Share::derive(asset, commitment, 0);
 
-                journal
-                    .assets
-                    .push((asset, self.assets.get(&asset).cloned()));
+                    journal
+                        .assets
+                        .push((asset, self.assets.get(&asset).cloned()));
 
-                journal.utxos.push((share, utxos.asset(&share).copied()));
-                self.assets.insert(
-                    asset,
-                    AssetRecord {
-                        metadata,
-                        supply: *initial_mint,
-                        total_minted: *initial_mint,
-                        mint_nonce: 0,
-                        total_burned: Unit::ZERO,
-                    },
-                );
-
-                utxos
-                    .insert_asset(
-                        share,
-                        AssetShare {
-                            asset: asset,
-                            amount: *initial_mint,
-                            owner: call.signer,
-                        },
-                    )
-                    .map_err(|_| AssetError::ShareAlreadyExists)?;
-            }
-
-            AssetInstruction::Mint {
-                asset,
-                nonce,
-                recipient,
-                amount,
-            } => {
-                let share = Share::derive(*asset, commitment, 0);
-                let previous = self.assets.get(asset).cloned();
-                let record = self.assets.get_mut(asset).ok_or(AssetError::UnknownAsset)?;
-                record.supply = record
-                    .supply
-                    .checked_add(*amount)
-                    .ok_or(AssetError::SupplyOverflow)?;
-                record.total_minted = record
-                    .total_minted
-                    .checked_add(*amount)
-                    .ok_or(AssetError::SupplyOverflow)?;
-                record.mint_nonce = *nonce;
-                journal.assets.push((*asset, previous));
-
-                journal.utxos.push((share, utxos.asset(&share).copied()));
-
-                utxos
-                    .insert_asset(
-                        share,
-                        AssetShare {
-                            asset: *asset,
-                            amount: *amount,
-                            owner: *recipient,
-                        },
-                    )
-                    .map_err(|_| AssetError::ShareAlreadyExists)?;
-            }
-
-            AssetInstruction::Burn {
-                asset,
-                inputs,
-                amount,
-                output,
-            } => {
-                let total = self.validate_inputs(utxos, *asset, inputs)?;
-                let expected_total = amount
-                    .checked_add(*output)
-                    .ok_or(AssetError::BalanceOverflow)?;
-                if total != expected_total {
-                    return Err(AssetError::InvalidAmount);
-                }
-                let previous = self.assets.get(asset).cloned();
-                let record = self.assets.get_mut(asset).ok_or(AssetError::UnknownAsset)?;
-                record.supply = record
-                    .supply
-                    .checked_sub(*amount)
-                    .ok_or(AssetError::SupplyOverflow)?;
-                record.total_burned = record
-                    .total_burned
-                    .checked_add(*amount)
-                    .ok_or(AssetError::SupplyOverflow)?;
-                journal.assets.push((*asset, previous));
-
-                for input in inputs {
-                    journal.utxos.push((*input, utxos.asset(input).copied()));
-                    utxos
-                        .consume_asset(input)
-                        .map_err(|_| AssetError::UnknownObject)?;
-                }
-                if !output.is_zero() {
-                    let share = Share::derive(*asset, commitment, 0);
                     journal.utxos.push((share, utxos.asset(&share).copied()));
+                    self.assets.insert(
+                        asset,
+                        AssetRecord {
+                            metadata,
+                            supply: *initial_mint,
+                            total_minted: *initial_mint,
+                            mint_nonce: 0,
+                            total_burned: Unit::ZERO,
+                        },
+                    );
+                    checkpoint(TransitionPoint::AssetRecordUpdated)?;
+
+                    utxos
+                        .insert_asset(
+                            share,
+                            AssetShare {
+                                asset: asset,
+                                amount: *initial_mint,
+                                owner: call.signer,
+                            },
+                        )
+                        .map_err(|_| AssetError::ShareAlreadyExists)?;
+                    checkpoint(TransitionPoint::AssetOutputCreated)?;
+                }
+
+                AssetInstruction::Mint {
+                    asset,
+                    nonce,
+                    recipient,
+                    amount,
+                } => {
+                    let share = Share::derive(*asset, commitment, 0);
+                    let previous = self.assets.get(asset).cloned();
+                    let record = self.assets.get_mut(asset).ok_or(AssetError::UnknownAsset)?;
+                    let supply = record
+                        .supply
+                        .checked_add(*amount)
+                        .ok_or(AssetError::SupplyOverflow)?;
+                    let total_minted = record
+                        .total_minted
+                        .checked_add(*amount)
+                        .ok_or(AssetError::SupplyOverflow)?;
+                    journal.assets.push((*asset, previous));
+                    record.supply = supply;
+                    record.total_minted = total_minted;
+                    record.mint_nonce = *nonce;
+                    checkpoint(TransitionPoint::AssetRecordUpdated)?;
+
+                    journal.utxos.push((share, utxos.asset(&share).copied()));
+
                     utxos
                         .insert_asset(
                             share,
                             AssetShare {
                                 asset: *asset,
-                                amount: *output,
-                                owner: call.signer,
+                                amount: *amount,
+                                owner: *recipient,
                             },
                         )
                         .map_err(|_| AssetError::ShareAlreadyExists)?;
+                    checkpoint(TransitionPoint::AssetOutputCreated)?;
+                }
+
+                AssetInstruction::Burn {
+                    asset,
+                    inputs,
+                    amount,
+                    output,
+                } => {
+                    let total = self.validate_inputs(utxos, *asset, inputs)?;
+                    let expected_total = amount
+                        .checked_add(*output)
+                        .ok_or(AssetError::BalanceOverflow)?;
+                    if total != expected_total {
+                        return Err(AssetError::InvalidAmount);
+                    }
+                    let previous = self.assets.get(asset).cloned();
+                    let record = self.assets.get_mut(asset).ok_or(AssetError::UnknownAsset)?;
+                    let supply = record
+                        .supply
+                        .checked_sub(*amount)
+                        .ok_or(AssetError::SupplyOverflow)?;
+                    let total_burned = record
+                        .total_burned
+                        .checked_add(*amount)
+                        .ok_or(AssetError::SupplyOverflow)?;
+                    journal.assets.push((*asset, previous));
+                    record.supply = supply;
+                    record.total_burned = total_burned;
+                    checkpoint(TransitionPoint::AssetRecordUpdated)?;
+
+                    for input in inputs {
+                        journal.utxos.push((*input, utxos.asset(input).copied()));
+                        utxos
+                            .consume_asset(input)
+                            .map_err(|_| AssetError::UnknownObject)?;
+                        checkpoint(TransitionPoint::AssetInputConsumed)?;
+                    }
+                    if !output.is_zero() {
+                        let share = Share::derive(*asset, commitment, 0);
+                        journal.utxos.push((share, utxos.asset(&share).copied()));
+                        utxos
+                            .insert_asset(
+                                share,
+                                AssetShare {
+                                    asset: *asset,
+                                    amount: *output,
+                                    owner: call.signer,
+                                },
+                            )
+                            .map_err(|_| AssetError::ShareAlreadyExists)?;
+                        checkpoint(TransitionPoint::AssetOutputCreated)?;
+                    }
                 }
             }
-        }
 
-        Ok(journal)
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => Ok(journal),
+            Err(error) => {
+                self.rollback(utxos, journal)
+                    .map_err(|_| AssetError::InvalidProgram)?;
+                Err(error)
+            }
+        }
     }
 
     pub fn apply_account_transfer(
@@ -352,6 +409,25 @@ impl AssetState {
         inputs: &[Share],
         outputs: &[AssetOutput],
         commitment: [u8; HASH_SIZE],
+    ) -> Result<AssetRollbackJournal, AssetError> {
+        self.apply_account_transfer_with_checkpoint(
+            utxos,
+            asset,
+            inputs,
+            outputs,
+            commitment,
+            |_| Ok(()),
+        )
+    }
+
+    fn apply_account_transfer_with_checkpoint(
+        &mut self,
+        utxos: &mut utxo::UtxoSet,
+        asset: AssetContract,
+        inputs: &[Share],
+        outputs: &[AssetOutput],
+        commitment: [u8; HASH_SIZE],
+        mut checkpoint: impl FnMut(TransitionPoint) -> Result<(), AssetError>,
     ) -> Result<AssetRollbackJournal, AssetError> {
         self.metadata(asset).ok_or(AssetError::UnknownAsset)?;
 
@@ -375,33 +451,46 @@ impl AssetState {
 
         let mut journal = AssetRollbackJournal::default();
 
-        for input in inputs {
-            journal.utxos.push((*input, utxos.asset(input).copied()));
-            utxos
-                .consume_asset(input)
-                .map_err(|_| AssetError::UnknownObject)?;
+        let result = (|| {
+            for input in inputs {
+                journal.utxos.push((*input, utxos.asset(input).copied()));
+                utxos
+                    .consume_asset(input)
+                    .map_err(|_| AssetError::UnknownObject)?;
+                checkpoint(TransitionPoint::AssetInputConsumed)?;
+            }
+
+            for (index, output) in outputs.iter().enumerate() {
+                let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
+
+                let id = Share::derive(asset, commitment, index);
+
+                journal.utxos.push((id, utxos.asset(&id).copied()));
+
+                utxos
+                    .insert_asset(
+                        id,
+                        AssetShare {
+                            asset: asset,
+                            amount: output.amount,
+                            owner: output.recipient,
+                        },
+                    )
+                    .map_err(|_| AssetError::ShareAlreadyExists)?;
+                checkpoint(TransitionPoint::AssetOutputCreated)?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => Ok(journal),
+            Err(error) => {
+                self.rollback(utxos, journal)
+                    .map_err(|_| AssetError::InvalidProgram)?;
+                Err(error)
+            }
         }
-
-        for (index, output) in outputs.iter().enumerate() {
-            let index = u32::try_from(index).map_err(|_| AssetError::InvalidProgram)?;
-
-            let id = Share::derive(asset, commitment, index);
-
-            journal.utxos.push((id, utxos.asset(&id).copied()));
-
-            utxos
-                .insert_asset(
-                    id,
-                    AssetShare {
-                        asset: asset,
-                        amount: output.amount,
-                        owner: output.recipient,
-                    },
-                )
-                .map_err(|_| AssetError::ShareAlreadyExists)?;
-        }
-
-        Ok(journal)
     }
 }
 
@@ -576,17 +665,19 @@ impl LedgerState {
         burned: Zeno,
         journal: &mut SpendRollbackJournal,
     ) -> Result<(), StateError> {
-        self.coin.total_burned = self
+        let total_burned = self
             .coin
             .total_burned
             .checked_add(burned)
             .ok_or(StateError::BurnOverflow)?;
 
-        journal.burned = journal
+        let journal_burned = journal
             .burned
             .checked_add(burned)
             .ok_or(StateError::BurnOverflow)?;
 
+        self.coin.total_burned = total_burned;
+        journal.burned = journal_burned;
         Ok(())
     }
 
@@ -708,6 +799,212 @@ fn restore_map<K: Ord, V>(map: &mut BTreeMap<K, V>, entries: Vec<(K, Option<V>)>
 }
 
 #[cfg(test)]
+mod phase2_failure_injection_tests {
+    use super::*;
+    use crate::{
+        monetary::coin::CoinOutput,
+        transaction::{AssetInstruction, SpendCharges},
+    };
+
+    fn address(byte: u8) -> Address {
+        Address([byte; crypto::ADDRESS_SIZE])
+    }
+
+    fn asset_fixture() -> (AssetState, utxo::UtxoSet, AssetIntent, AssetContract, Share) {
+        let owner = address(1);
+        let call = AssetIntent::new(
+            AssetInstruction::Register {
+                name: "Atomicity".into(),
+                max_supply: Unit::from_units(100),
+                initial_mint: Unit::from_units(10),
+                mint_authority: owner,
+                nonce: 0,
+            },
+            owner,
+        );
+        let asset = call.asset().unwrap();
+        let share = Share::derive(asset, call.commitment([7; 32]).unwrap(), 0);
+        let mut state = AssetState::default();
+        let mut utxos = utxo::UtxoSet::default();
+        state.apply(&mut utxos, &call, [7; 32]).unwrap();
+        (state, utxos, call, asset, share)
+    }
+
+    #[test]
+    fn coin_spend_failure_after_each_mutation_restores_state_and_retry_root() {
+        let owner = address(1);
+        let input = CoinShare::from_bytes([3; crypto::HASH16_SIZE]);
+        let mut original = LedgerState::default();
+        original.coin.total_mined = Zeno::from_zeno(100);
+        original
+            .utxos
+            .insert_coin(
+                input,
+                CoinUtxo {
+                    amount: Zeno::from_zeno(100),
+                    owner,
+                },
+            )
+            .unwrap();
+        let intent = SpendIntent::coin_with_charges(
+            owner,
+            vec![input],
+            vec![CoinOutput::new(address(2), Zeno::from_zeno(70))],
+            SpendCharges::new(Zeno::from_zeno(10)),
+        )
+        .unwrap();
+        let commitment = SpendIntentCommitment::from_bytes([4; HASH_SIZE]);
+        let mut expected = original.clone();
+        expected
+            .apply_onchain_spend_with_commitment(&intent, commitment, address(9))
+            .unwrap();
+        let expected_bytes = borsh::to_vec(&expected).unwrap();
+
+        for point in [
+            TransitionPoint::CoinInputConsumed,
+            TransitionPoint::CoinOutputCreated,
+            TransitionPoint::MinerFeeCreated,
+            TransitionPoint::ProtocolBurnRecorded,
+        ] {
+            let mut state = original.clone();
+            assert!(matches!(
+                state.apply_onchain_spend_with_checkpoint(
+                    &intent,
+                    commitment,
+                    address(9),
+                    |seen| if seen == point {
+                        Err(StateError::InvalidTransaction)
+                    } else {
+                        Ok(())
+                    },
+                ),
+                Err(StateError::InvalidTransaction)
+            ));
+            assert_eq!(state, original, "failure at {point:?}");
+            state
+                .apply_onchain_spend_with_commitment(&intent, commitment, address(9))
+                .unwrap();
+            assert_eq!(borsh::to_vec(&state).unwrap(), expected_bytes);
+        }
+    }
+
+    #[test]
+    fn asset_calls_failure_after_each_mutation_restores_state_and_retry_bytes() {
+        let owner = address(1);
+        let (_, _, register, asset, input) = asset_fixture();
+        let mint = AssetIntent::new(
+            AssetInstruction::Mint {
+                asset,
+                nonce: 1,
+                recipient: address(2),
+                amount: Unit::from_units(5),
+            },
+            owner,
+        );
+        let burn = AssetIntent::new(
+            AssetInstruction::Burn {
+                asset,
+                inputs: vec![input],
+                amount: Unit::from_units(4),
+                output: Unit::from_units(6),
+            },
+            owner,
+        );
+        for (call, points) in [
+            (
+                register,
+                vec![
+                    TransitionPoint::AssetRecordUpdated,
+                    TransitionPoint::AssetOutputCreated,
+                ],
+            ),
+            (
+                mint,
+                vec![
+                    TransitionPoint::AssetRecordUpdated,
+                    TransitionPoint::AssetOutputCreated,
+                ],
+            ),
+            (
+                burn,
+                vec![
+                    TransitionPoint::AssetRecordUpdated,
+                    TransitionPoint::AssetInputConsumed,
+                    TransitionPoint::AssetOutputCreated,
+                ],
+            ),
+        ] {
+            let (start_state, start_utxos) =
+                if matches!(&call.instruction, AssetInstruction::Register { .. }) {
+                    (AssetState::default(), utxo::UtxoSet::default())
+                } else {
+                    let (state, utxos, _, _, _) = asset_fixture();
+                    (state, utxos)
+                };
+            let mut expected_state = start_state.clone();
+            let mut expected_utxos = start_utxos.clone();
+            expected_state
+                .apply(&mut expected_utxos, &call, [7; 32])
+                .unwrap();
+            for point in points {
+                let mut state = start_state.clone();
+                let mut utxos = start_utxos.clone();
+                assert_eq!(
+                    state.apply_with_checkpoint(&mut utxos, &call, [7; 32], |seen| {
+                        if seen == point {
+                            Err(AssetError::InvalidProgram)
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(AssetError::InvalidProgram),
+                    "failure at {point:?}"
+                );
+                assert_eq!(state, start_state);
+                assert_eq!(utxos, start_utxos);
+                state.apply(&mut utxos, &call, [7; 32]).unwrap();
+                assert_eq!(
+                    (state, utxos),
+                    (expected_state.clone(), expected_utxos.clone())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn asset_transfer_failure_after_input_or_output_restores_state() {
+        let (original_state, original_utxos, _, asset, input) = asset_fixture();
+        let outputs = [AssetOutput::new(address(2), Unit::from_units(10))];
+        for point in [
+            TransitionPoint::AssetInputConsumed,
+            TransitionPoint::AssetOutputCreated,
+        ] {
+            let mut state = original_state.clone();
+            let mut utxos = original_utxos.clone();
+            assert_eq!(
+                state.apply_account_transfer_with_checkpoint(
+                    &mut utxos,
+                    asset,
+                    &[input],
+                    &outputs,
+                    [8; HASH_SIZE],
+                    |seen| if seen == point {
+                        Err(AssetError::InvalidProgram)
+                    } else {
+                        Ok(())
+                    },
+                ),
+                Err(AssetError::InvalidProgram)
+            );
+            assert_eq!(
+                (state, utxos),
+                (original_state.clone(), original_utxos.clone())
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -719,7 +1016,6 @@ mod tests {
         AssetIntent::new(
             AssetInstruction::Register {
                 name: "Nonce Asset".into(),
-                decimals: 0,
                 max_supply: Unit::from_units(100),
                 initial_mint: Unit::from_units(10),
                 mint_authority: authority,
@@ -833,6 +1129,7 @@ mod tests {
 mod invariant_tests {
     use super::*;
     use crate::monetary::coin::CoinOutput;
+    use crypto::HASH16_SIZE;
 
     const GENESIS_HASH: [u8; 32] = [0x33; 32];
 
@@ -851,7 +1148,6 @@ mod invariant_tests {
         AssetIntent::new(
             AssetInstruction::Register {
                 name: name.into(),
-                decimals: 0,
                 max_supply: Unit::from_units(max_supply),
                 initial_mint: Unit::from_units(initial_mint),
                 mint_authority: authority,
@@ -1124,7 +1420,7 @@ mod invariant_tests {
 
         let result = ledger.apply_onchain_spend_with_commitment(
             &intent,
-            SpendIntentCommitment::from_bytes([0x77; HASH16_SIZE]),
+            SpendIntentCommitment::from_bytes([0x77; HASH_SIZE]),
             test_address(9),
         );
 
@@ -1137,7 +1433,7 @@ mod invariant_tests {
         let sender = test_address(1);
         let recipient = test_address(2);
         let input = CoinShare::from_bytes([0x22; HASH16_SIZE]);
-        let commitment = SpendIntentCommitment::from_bytes([0x88; HASH16_SIZE]);
+        let commitment = SpendIntentCommitment::from_bytes([0x88; HASH_SIZE]);
 
         let mut ledger = LedgerState::default();
         ledger
@@ -1206,7 +1502,6 @@ mod global_invariant_tests {
         AssetIntent::new(
             AssetInstruction::Register {
                 name: name.into(),
-                decimals: 0,
                 max_supply: Unit::from_units(max_supply),
                 initial_mint: Unit::from_units(initial_mint),
                 mint_authority: authority,

@@ -6,8 +6,8 @@ use kernel::{
         address_to_string, hash_bytes,
     },
     transaction::{
-        AccountAuthorization, AccountIntent, AssetIntent, AuthorizedAccountIntent, SpendIntent,
-        payment_commitment,
+        AccountAuthorization, AccountIntent, AssetIntent, AuthorizedAccountIntent,
+        AuthorizedAssetTransaction, SpendIntent, asset_call_commitment,
     },
 };
 
@@ -271,34 +271,20 @@ impl AccountWallet {
         })
     }
 
-    pub fn sign_asset_intent(
+    pub fn sign_asset_call(
         &self,
-
-        action: kernel::transaction::AssetInstruction,
-    ) -> Result<AuthorizedAccountIntent<kernel::transaction::AssetIntent>, String> {
-        self.sign_account_intent(kernel::transaction::AssetIntent::new(action, self.address))
-    }
-
-    pub fn sign_asset_call_payment(
-        &self,
-
-        parent: &AssetIntent,
-
+        call: AssetIntent,
         payment: SpendIntent,
-    ) -> Result<AuthorizedAccountIntent<SpendIntent>, String> {
+    ) -> Result<AuthorizedAssetTransaction, String> {
         let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-
         let commitment =
-            payment_commitment(parent, &payment, chain).map_err(|error| error.to_string())?;
-
+            asset_call_commitment(&call, &payment, chain).map_err(|error| error.to_string())?;
         let signature = self.signing_seed.sign(commitment.as_bytes());
-
-        Ok(AuthorizedAccountIntent {
-            intent: payment,
-
+        Ok(AuthorizedAssetTransaction {
+            call,
+            payment,
             authorization: AccountAuthorization {
                 public_key: self.public_key.clone(),
-
                 signature,
             },
         })

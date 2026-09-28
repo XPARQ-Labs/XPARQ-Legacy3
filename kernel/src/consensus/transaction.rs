@@ -143,8 +143,7 @@ pub fn validate_transaction(
     //
     // Authorization is a transaction-level invariant.
     //
-    // Principal and payment signatures MUST be verified together here so
-    // role separation and parent-binding cannot be bypassed by consensus.
+    // Verify each transaction's complete authorization before state checks.
     //
     validate_authorization_gate(&transaction, chain, current_height)?;
 
@@ -267,7 +266,7 @@ fn validate_authorized_transaction(
                 .asset_transition_created_state_weight(call.intent(), chain.genesis_hash)
                 .map_err(TransactionConsensusError::Asset)?;
 
-            let payment = prepare_spend_intent(transaction.payment, chain)?;
+            let payment = prepare_unsigned_spend_intent(transaction.payment, chain)?;
 
             let (payment_inputs, payment_outputs) = coin_parts(payment.intent())?;
 
@@ -334,7 +333,7 @@ fn validate_required_burn(
 }
 
 fn prepare_asset_intent(
-    authorized: AuthorizedAccountIntent<AssetIntent>,
+    intent: AssetIntent,
     chain: ChainContext,
 ) -> Result<AuthorizationValidated<AssetIntent>, TransactionConsensusError> {
     //
@@ -342,22 +341,17 @@ fn prepare_asset_intent(
     // This commitment is the semantic commitment used by ledger object IDs,
     // NOT an authorization commitment.
     //
-    authorized
-        .intent
+    intent
         .validate_structure()
         .map_err(TransactionConsensusError::Asset)?;
 
     let commitment = SpendIntentCommitment::from_bytes(
-        authorized
-            .intent
+        intent
             .semantic_commitment(chain.genesis_hash)
             .map_err(TransactionConsensusError::Asset)?,
     );
 
-    Ok(AuthorizationValidated {
-        intent: authorized.intent,
-        commitment,
-    })
+    Ok(AuthorizationValidated { intent, commitment })
 }
 
 fn prepare_spend_intent(
@@ -373,6 +367,17 @@ fn prepare_spend_intent(
     let intent = structurally_validated.into_intent();
 
     Ok(AuthorizationValidated { intent, commitment })
+}
+
+fn prepare_unsigned_spend_intent(
+    intent: SpendIntent,
+    chain: ChainContext,
+) -> Result<AuthorizationValidated<SpendIntent>, TransactionConsensusError> {
+    let validated = validate_intent(intent, chain)?;
+    Ok(AuthorizationValidated {
+        commitment: validated.commitment(),
+        intent: validated.into_intent(),
+    })
 }
 
 fn validate_coin_inputs(
@@ -516,7 +521,7 @@ mod p3e_authorization_gate_tests {
             coin::{CoinOutput, Zeno},
         },
         transaction::{
-            AccountAuthorization, AccountIntent, AuthorizedAssetTransaction, payment_commitment,
+            AccountAuthorization, AccountIntent, AuthorizedAssetTransaction, asset_call_commitment,
         },
     };
 
@@ -578,19 +583,20 @@ mod p3e_authorization_gate_tests {
         }
     }
 
-    fn authorize_asset_call_payment(
-        parent: &AssetIntent,
+    fn authorize_asset_call(
+        call: AssetIntent,
         payment: SpendIntent,
-        payer: &SigningSeed,
+        owner: &SigningSeed,
         chain: ChainContext,
-    ) -> AuthorizedAccountIntent<SpendIntent> {
-        let commitment = payment_commitment(parent, &payment, chain).unwrap();
+    ) -> AuthorizedAssetTransaction {
+        let commitment = asset_call_commitment(&call, &payment, chain).unwrap();
 
-        AuthorizedAccountIntent {
-            intent: payment,
+        AuthorizedAssetTransaction {
+            call,
+            payment,
             authorization: AccountAuthorization {
-                public_key: payer.public_key(),
-                signature: payer.sign(commitment.as_bytes()),
+                public_key: owner.public_key(),
+                signature: owner.sign(commitment.as_bytes()),
             },
         }
     }
@@ -626,18 +632,19 @@ mod p3e_authorization_gate_tests {
     #[test]
     fn direct_spend_signature_cannot_be_used_as_asset_call_payment_in_consensus() {
         let caller = seed(3);
-        let payer = seed(4);
         let chain = chain(0x31);
 
         let call = asset_call_intent(&caller, 7);
-        let payment = coin_intent(&payer, 3, 20);
-
-        // Deliberately authorize payment as a principal DirectSpend.
-        let wrong_payment = authorize_principal(payment, &payer, chain);
+        let payment = coin_intent(&caller, 3, 20);
+        let wrong_commitment = payment.principal_commitment(chain).unwrap();
 
         let transaction = AuthorizedTransaction::Asset(Box::new(AuthorizedAssetTransaction {
-            call: authorize_principal(call, &caller, chain),
-            payment: wrong_payment,
+            call,
+            payment,
+            authorization: AccountAuthorization {
+                public_key: caller.public_key(),
+                signature: caller.sign(wrong_commitment.as_bytes()),
+            },
         }));
 
         assert!(matches!(
@@ -649,18 +656,16 @@ mod p3e_authorization_gate_tests {
     #[test]
     fn asset_call_payment_cannot_be_detached_to_another_parent_in_consensus() {
         let caller = seed(5);
-        let payer = seed(6);
         let chain = chain(0x41);
 
         let call_a = asset_call_intent(&caller, 1);
         let call_b = asset_call_intent(&caller, 2);
-        let payment = coin_intent(&payer, 4, 30);
-
-        let payment_for_a = authorize_asset_call_payment(&call_a, payment, &payer, chain);
+        let payment = coin_intent(&caller, 4, 30);
+        let signed = authorize_asset_call(call_a, payment, &caller, chain);
 
         let forged = AuthorizedTransaction::Asset(Box::new(AuthorizedAssetTransaction {
-            call: authorize_principal(call_b, &caller, chain),
-            payment: payment_for_a,
+            call: call_b,
+            ..signed
         }));
 
         assert!(matches!(

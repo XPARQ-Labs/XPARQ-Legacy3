@@ -347,9 +347,8 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
     reject_manual_fee(args)?;
     let wallet = load_wallet(option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH))?;
     let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
-    let call = wallet.0.sign_asset_intent(instruction)?;
+    let call = kernel::transaction::AssetIntent::new(instruction, wallet.address());
     let created_state_weight = call
-        .intent
         .created_state_weight()
         .map_err(|error| format!("calculate asset state weight: {error:?}"))?;
     let transaction = automatic_fee_transaction(|fee, archival_burn| {
@@ -372,13 +371,8 @@ fn submit_asset_instruction(args: &[String], instruction: AssetInstruction) -> R
             SpendCharges::new(Zeno::from_zeno(fee)),
         )
         .map_err(|error| error.to_string())?;
-        let fee = wallet.0.sign_asset_call_payment(&call.intent, fee_intent)?;
-        Ok(AuthorizedTransaction::Asset(Box::new(
-            AuthorizedAssetTransaction {
-                call: call.clone(),
-                payment: fee,
-            },
-        )))
+        let signed = wallet.0.sign_asset_call(call.clone(), fee_intent)?;
+        Ok(AuthorizedTransaction::Asset(Box::new(signed)))
     })?;
     submit_or_print_transaction(args, &transaction)
 }
