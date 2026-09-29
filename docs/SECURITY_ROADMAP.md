@@ -94,7 +94,7 @@ allocation path.
 **Acceptance:** Pathological payloads fail within measured memory and time
 limits through RPC, P2P, block replay, and direct kernel validation.
 
-## Phase 4 — Lock down deterministic execution
+## Phase 4 — Lock down deterministic execution [DONE]
 
 Create permanent vectors for serialized transactions, authorization
 commitments, blocks, expected UTXOs and supply counters, and resulting state
