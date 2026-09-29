@@ -130,7 +130,7 @@ struct SubmitTransactionResponse {
     hash: String,
 }
 
-const MAX_CONSOLIDATION_INPUTS: usize = 10_000;
+const MAX_CONSOLIDATION_INPUTS: usize = 1_000;
 
 pub fn run(mut args: Vec<String>) -> Result<(), String> {
     let result = match args.first().map(String::as_str) {
