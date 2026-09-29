@@ -14,7 +14,7 @@ use crate::{
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
 
 pub const WBDA_WINDOW: usize = 1_000;
-pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 2 * 1024 * 1024;
+pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 800_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 1_200_000;
 pub const WBDA_HARDER_PERCENT: u32 = 90;

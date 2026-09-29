@@ -18,7 +18,7 @@ use crate::{
     transaction::{MAX_TRANSACTION_SIZE, Transaction},
 };
 
-pub const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 pub const MAX_BLOCK_TRANSACTIONS: usize = 4096;
 pub const GENESIS_TARGET_BITS: u32 = 0x207f_ffff;
 
