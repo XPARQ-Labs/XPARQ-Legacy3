@@ -3,71 +3,28 @@ use crypto::{POW_HASH_SIZE, PoWHash};
 const COMPACT_MANTISSA_MASK: u32 = 0x007f_ffff;
 const COMPACT_SIGN_MASK: u32 = 0x0080_0000;
 
-/// Canonical 256-bit proof-of-work target.
-///
-/// The target is stored in big-endian byte order.
-///
-/// A proof-of-work hash is valid when:
-///
-/// ```text
-/// hash <= target
-/// ```
-///
-/// Therefore:
-///
-/// - smaller target = harder PoW
-/// - larger target  = easier PoW
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PoWTarget([u8; POW_HASH_SIZE]);
 
 impl PoWTarget {
-    /// Constructs a target from canonical big-endian bytes.
-    ///
-    /// A zero target is rejected because it would make proof-of-work
-    /// effectively impossible.
     pub fn from_bytes(bytes: [u8; POW_HASH_SIZE]) -> Option<Self> {
         let target = Self(bytes);
 
         if target.is_zero() { None } else { Some(target) }
     }
 
-    /// Returns the canonical big-endian target bytes.
     pub const fn as_bytes(&self) -> &[u8; POW_HASH_SIZE] {
         &self.0
     }
 
-    /// Returns true when this target is zero.
     fn is_zero(&self) -> bool {
         self.0.iter().all(|byte| *byte == 0)
     }
 
-    /// Returns true when the PoW hash is numerically less than or equal
-    /// to this target.
-    ///
-    /// Both values use canonical big-endian byte ordering, therefore
-    /// lexicographic byte comparison is equivalent to numeric comparison.
     pub fn meets(self, hash: &PoWHash) -> bool {
         hash.as_bytes() <= self.as_bytes()
     }
 
-    /// Scales this 256-bit target by a small rational value.
-    ///
-    /// This operation is used by XPARQ's weight-based difficulty policy.
-    ///
-    /// Examples:
-    ///
-    /// ```text
-    /// 95 / 100  -> smaller target -> harder PoW
-    /// 100 / 100 -> unchanged
-    /// 105 / 100 -> larger target  -> easier PoW
-    /// ```
-    ///
-    /// XPARQ intentionally limits numerator and denominator to 8-bit
-    /// values because the consensus policy uses small percentage-based
-    /// adjustments rather than timestamp-based timespan ratios.
-    ///
-    /// A 33-byte intermediate is sufficient because multiplying a
-    /// 256-bit target by an 8-bit value may require at most 264 bits.
     pub fn scale_ratio(self, numerator: u32, denominator: u32) -> Option<Self> {
         if numerator == 0
             || denominator == 0

@@ -66,7 +66,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 3;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {

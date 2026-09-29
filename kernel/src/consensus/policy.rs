@@ -1,5 +1,3 @@
-//! Consensus monetary, WBDA, and protocol-burn policy.
-
 use std::{error::Error as StdError, fmt};
 
 use static_assertions::const_assert;
@@ -13,12 +11,12 @@ use crate::{
 
 use crypto::{ADDRESS_SIZE, Address, HASH_SIZE, Hash, HashDomain, canonical_bytes, domain};
 
-pub const WBDA_WINDOW: usize = 1_000;
+pub const WBDA_WINDOW: usize = 10_000;
 pub const WBDA_TARGET_BLOCK_WEIGHT: usize = 1 * 1024 * 1024;
 pub const WBDA_LOW_UTILIZATION_PPM: u64 = 800_000;
 pub const WBDA_HIGH_UTILIZATION_PPM: u64 = 1_200_000;
-pub const WBDA_HARDER_PERCENT: u32 = 90;
-pub const WBDA_EASIER_PERCENT: u32 = 110;
+pub const WBDA_HARDER_PERCENT: u32 = 80;
+pub const WBDA_EASIER_PERCENT: u32 = 120;
 pub const DIFFICULTY_ALGORITHM: &str = "argon2id-wbda-algorithm";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,18 +78,14 @@ pub fn next_difficulty_from_window(
     let pow_limit = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
 
     let next = match adjustment {
-        // Old "Decrease difficulty" = easier.
-        // Easier means a larger target.
+
         WbdaAdjustment::Decrease => previous.scale_ratio(WBDA_EASIER_PERCENT, 100)?,
 
         WbdaAdjustment::Keep => previous,
 
-        // Old "Increase difficulty" = harder.
-        // Harder means a smaller target.
         WbdaAdjustment::Increase => previous.scale_ratio(WBDA_HARDER_PERCENT, 100)?,
     };
 
-    // Never become easier than the configured PoW limit.
     let next = if next > pow_limit { pow_limit } else { next };
 
     Some(next.to_compact())
@@ -145,7 +139,7 @@ pub const TAIL_BLOCK_EMISSION: u64 = 78_125_000; // 0.781250 XPQ
 pub const EMISSION_RISING_STEPS: u64 = 5;
 pub const EMISSION_HALVINGS_TO_TAIL: u64 = 6;
 
-pub const EMISSION_INTERVAL: u64 = 50_000;
+pub const EMISSION_INTERVAL: u64 = 100_000;
 
 const_assert!(BLOCK_EMISSION_START * (1_u64 << EMISSION_RISING_STEPS) == MAX_BLOCK_EMISSION);
 
