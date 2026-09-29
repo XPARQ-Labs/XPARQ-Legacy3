@@ -44,7 +44,7 @@ pub(super) fn format_amount(units: u64) -> String {
     let whole = units / CoinShare::ZENO_PER_COIN;
     let fraction = units % CoinShare::ZENO_PER_COIN;
     let width = DECIMALS as usize;
-    format!("{whole}.{fraction:0width$} CoinShare")
+    format!("{whole}.{fraction:0width$} XPQ")
 }
 
 pub(super) fn print_help() {
