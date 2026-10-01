@@ -413,3 +413,135 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     drop(a_node);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
+    use extension::{
+        asset_program::{
+            asset::Unit,
+            opcode::AssetOpcode,
+            state::{AssetState, ExecutionContext},
+            type_::{AssetCall, Register},
+        },
+        script::call::{ProgramCall, ProgramId},
+    };
+    use kernel::{
+        consensus::{ProtocolBurn, StateTransitionWeight},
+        transaction::{
+            AccountAuthorization, AuthorizedProgramTransaction, SpendCharges,
+            program_transaction_commitment,
+        },
+    };
+    let root = temp_root("program-call");
+    let keys = SigningSeed::new(Signature::MlDsa44, Box::new([51; 32]));
+    let signer = address_from_public_key(&keys.public_key());
+    let address = address_to_string(&signer);
+    let mine_program = || {
+        let result = Command::new(node_binary())
+            .args(["mine-block", root.to_str().unwrap(), &address])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(result.success());
+    };
+    mine_program();
+    let rpc = free_address();
+    let p2p = free_address();
+    let node = start_node(&root, &p2p, &rpc, &[], None);
+    wait_for_status(&rpc, |s| s["tip_height"] == 1);
+    let account = account(&rpc, &address).unwrap();
+    let input = &account["utxos"].as_array().unwrap()[0];
+    let id: CoinShare = input["id"].as_str().unwrap().parse().unwrap();
+    let amount = input["amount"].as_u64().unwrap();
+    let register = Register {
+        name: "LIVEPROGRAM".into(),
+        max_supply: Unit::from_units(100),
+        initial_mint: Unit::from_units(10),
+        mint_authority: signer,
+        nonce: 1,
+    };
+    let call = ProgramCall {
+        program: ProgramId::ASSET,
+        opcode: AssetOpcode::Register as u8,
+        payload: borsh::to_vec(&register).unwrap(),
+    };
+    let mut preview = AssetState::default();
+    let before = canonical_bytes(&preview).unwrap().len();
+    preview
+        .apply(
+            &AssetCall::Register(register),
+            ExecutionContext {
+                signer,
+                commitment: [1; 32],
+            },
+        )
+        .unwrap();
+    let growth = (canonical_bytes(&preview).unwrap().len() - before) as u64;
+    let chain = kernel::genesis::chain_context().unwrap();
+    let mut size = 0;
+    let transaction = loop {
+        let fee = (size * 8).max(1);
+        let burn = ProtocolBurn::for_transaction(
+            StateTransitionWeight {
+                created_coin_utxos: 2,
+                consumed_coin_utxos: 1,
+                created_state_weight: growth,
+            },
+            size,
+        )
+        .unwrap()
+        .total()
+        .unwrap()
+        .as_zeno();
+        let payment = SpendIntent::coin_with_charges(
+            signer,
+            vec![id],
+            vec![CoinOutput::new(
+                signer,
+                Zeno::from_zeno(amount - burn - fee),
+            )],
+            SpendCharges::new(Zeno::from_zeno(fee)),
+        )
+        .unwrap();
+        let commitment = program_transaction_commitment(signer, &call, &payment, chain).unwrap();
+        let tx = AuthorizedTransaction::Program(Box::new(AuthorizedProgramTransaction {
+            signer,
+            call: call.clone(),
+            payment,
+            authorization: AccountAuthorization {
+                public_key: keys.public_key(),
+                signature: keys.sign(commitment.as_bytes()),
+            },
+        }));
+        let actual = canonical_bytes(&tx).unwrap().len() as u64;
+        if actual == size {
+            break tx;
+        }
+        size = actual;
+    };
+    let hash = hex::encode(transaction.id().unwrap());
+    assert_eq!(post_transaction(&rpc, &transaction)["hash"], hash);
+    drop(node);
+    mine_program();
+    let node = start_node(&root, &p2p, &rpc, &[], None);
+    let mined = wait_for_status(&rpc, |s| s["tip_height"] == 2);
+    let response = http_get(&rpc, &format!("/explorer/transaction/{hash}")).unwrap();
+    assert_eq!(response["status"], "confirmed");
+    assert_eq!(response["height"], 2);
+    drop(node);
+    let node = start_node(&root, &p2p, &rpc, &[], None);
+    assert_eq!(
+        wait_for_status(&rpc, |s| s["tip_height"] == 2)["tip_hash"],
+        mined["tip_hash"]
+    );
+    drop(node);
+    assert!(
+        Command::new(node_binary())
+            .args(["check", root.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::remove_dir_all(root).unwrap();
+}

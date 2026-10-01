@@ -1,4 +1,3 @@
-mod asset;
 mod authorization;
 mod spend;
 
@@ -28,12 +27,10 @@ fn deserialize_bounded_vec<T: BorshDeserialize, R: Read>(
 }
 
 pub use crate::error::{IntentError, TransactionEncodingError};
-pub use asset::{AssetInstruction, AssetIntent};
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizationCommitment, AuthorizationRole,
-    AuthorizedAccountIntent, AuthorizedAssetTransaction, AuthorizedProgramTransaction,
-    AuthorizedTransaction, IntentId, TransactionId, asset_call_commitment,
-    program_transaction_commitment,
+    AuthorizedAccountIntent, AuthorizedProgramTransaction, AuthorizedTransaction, IntentId,
+    TransactionId, program_transaction_commitment,
 };
 pub use spend::{Spend, SpendCharges, SpendIntent, SpendIntentCommitment};
 
@@ -50,18 +47,6 @@ mod phase3_bounds_tests {
         let mut bytes = vec![0_u8];
         bytes.extend_from_slice(&((MAX_TRANSACTION_ITEMS + 1) as u32).to_le_bytes());
         assert!(Spend::try_from_slice(&bytes).is_err());
-    }
-
-    #[test]
-    fn oversized_asset_name_and_burn_list_prefixes_are_rejected() {
-        let mut register = vec![0_u8];
-        register.extend_from_slice(&65_u32.to_le_bytes());
-        assert!(AssetInstruction::try_from_slice(&register).is_err());
-
-        let mut burn = vec![2_u8];
-        burn.extend_from_slice(&[0_u8; 32]);
-        burn.extend_from_slice(&((MAX_TRANSACTION_ITEMS + 1) as u32).to_le_bytes());
-        assert!(AssetInstruction::try_from_slice(&burn).is_err());
     }
 
     #[test]

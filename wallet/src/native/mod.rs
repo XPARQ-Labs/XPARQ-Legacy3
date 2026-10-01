@@ -5,13 +5,12 @@ use std::{
     str::FromStr,
 };
 
-use kernel::monetary::asset::{AssetContract, Unit};
 use kernel::monetary::coin::{CoinOutput, CoinShare, Zeno};
 use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight},
     crypto::{Address, Signature, address_from_string},
-    transaction::{AssetInstruction, AuthorizedTransaction, SpendCharges, SpendIntent},
+    transaction::{AuthorizedTransaction, SpendCharges, SpendIntent},
 };
 use serde::Deserialize;
 use wallet::{
@@ -64,7 +63,7 @@ struct BalanceResponse {
     reserved: u64,
     utxo_count: usize,
     #[serde(default)]
-    assets: Vec<AccountAssetBalance>,
+    program_assets: Vec<AccountAssetBalance>,
 }
 
 #[derive(Deserialize)]
@@ -78,22 +77,13 @@ struct NodeBurnResponse {
 struct AccountAssetBalance {
     asset: String,
     name: String,
-    max_supply: String,
-    mint: String,
     #[serde(default)]
     shares: Vec<AccountAssetShare>,
 }
 
 #[derive(Deserialize)]
 struct AccountAssetShare {
-    share_id: String,
     amount: String,
-    owner: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct AssetMetadataResponse {
-    mint_nonce: u64,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +113,8 @@ struct AddressActivity {
     direction: String,
     amount: u64,
     size_bytes: Option<usize>,
+    #[serde(default)]
+    program: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -143,13 +135,9 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("utxos") | Some("utxo-tracker") => print_utxo_tracker(&args[1..]),
         Some("sign-spend") => sign_spend(&args[1..]),
         Some("consolidate") => consolidate_coin_utxos(&args[1..]),
-        Some("asset-consolidate") => consolidate_asset_shares(&args[1..]),
-        Some("asset-register") => asset_register(&args[1..]),
-        Some("asset-mint") => asset_mint(&args[1..]),
-        Some("asset-burn") => asset_burn(&args[1..]),
-        Some("asset-transfer") => asset_transfer(&args[1..]),
-        Some("asset-info") => asset_info(&args[1..]),
-        Some("asset-balance") => asset_balance(&args[1..]),
+
+        Some(command) if command.starts_with("program-") => program::command(command, &args[1..]),
+
         Some("version") | Some("--version") | Some("-V") => {
             println!("wallet {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -164,7 +152,6 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
     result
 }
 
-mod asset;
 mod balance;
 mod cli;
 mod history;
@@ -173,11 +160,6 @@ mod transaction;
 mod util;
 mod utxo;
 mod wallet_file;
-
-use asset::{
-    asset_balance, asset_burn, asset_info, asset_mint, asset_register, asset_transfer,
-    consolidate_asset_shares,
-};
 
 use wallet_file::{load_wallet, write_account_wallet};
 
@@ -195,3 +177,5 @@ use history::{parse_history_limit, validate_history_cursor};
 
 #[cfg(test)]
 mod tests;
+
+mod program;

@@ -15,15 +15,16 @@ The following controls already exist and should be preserved:
 - Coin inputs are resolved from live UTXOs. Transaction validation checks
   ownership, duplicate inputs, value conservation, and exact protocol burn.
   Miner fees become outputs owned by the block miner.
-- Asset transfers conserve share value. Registration, mint, and burn update
-  asset supply records under existing authorization and supply rules.
+- Extension Program transfers conserve share value. Registration, mint, and burn
+  update extension asset records under authorization and supply rules.
 - Block execution uses staged state and checks the resulting state root before
   committing. Node reorganization uses a staged ledger.
 - After block execution, rollback, and snapshot restoration, the ledger
   reconciles live coin UTXOs with mined minus burned supply and live asset
   shares with recorded asset supply.
-- UTXO insertion rejects duplicate coin and share IDs. Zero-value coin
-  outputs are rejected. Block size is bounded.
+- Kernel UTXO insertion rejects duplicate coin IDs; extension share insertion
+  rejects duplicate share IDs. Zero-value coin outputs are rejected. Block size
+  is bounded.
 - Consensus hashes use named domains; transaction authorization binds the
   genesis hash and signed intent.
 
@@ -51,6 +52,10 @@ persisted chain remain unchanged after each failure.
 
 **Status: implemented and verified for current transition paths.**
 
+After legacy asset removal, coin mutation failure-injection tests remain active.
+Program transactions stage coin payment and extension execution together;
+block tests cover failed multi-call execution and corrupt rollback journals.
+
 Inject controlled failures after input consumption, output creation, fee and
 burn updates, asset register/mint/burn changes, emission creation, snapshot
 loading, and reorganization branch application.
@@ -66,7 +71,7 @@ successful retry produces the same state root as uninterrupted execution.
 
 **Status: implemented and tested for current transaction and block paths.**
 Consensus caps each serialized transaction at 256 KiB, each
-transaction input/output/share list at 4096 items, and a block at 4096
+coin transaction input/output list at 4096 items, and a block at 4096
 transactions. Borsh decoding rejects oversized list prefixes before reading
 their elements. Block decoding also limits bytes read for each transaction,
 and in-memory block validation counts serialized bytes with a capped writer
@@ -74,12 +79,15 @@ instead of allocating an unbounded block buffer.
 Direct kernel validation checks the same limits before
 signature verification. Node RPC, relay, and stored mempool transactions use
 the transaction byte limit. These consensus changes are reflected in chain
-spec version 2 and require a fresh compatible chain/storage.
+spec version 1 for the reset baseline (coin-only kernel state and Program asset
+transactions) and require fresh compatible chain/storage. Extension asset calls
+limit transfer/burn inputs to 256 shares per call; transfer allows 256 outputs. See [ProgramCall integration](PROGRAM_CALL.md).
 
 Malformed list prefixes, block replay bytes, oversized direct transactions,
 RPC lengths, and P2P frame lengths have focused regression tests. In a local
 run, these rejection tests each completed within 0.1 s and the test processes
-peaked near 11 MiB RSS; these are observations, not consensus thresholds.
+peaked near 11 MiB RSS; these historical observations predate legacy removal
+and are not measurements of the current Program path or consensus thresholds.
 
 Audit transaction bytes, input and output counts, asset share counts, block
 transaction counts, and vector lengths during decoding. Apply bounds before
@@ -100,6 +108,10 @@ Create permanent vectors for serialized transactions, authorization
 commitments, blocks, expected UTXOs and supply counters, and resulting state
 roots. Cover emission, asset operations, rollback, and divergent reorganization.
 Run them after serialization, cryptography, monetary, or toolchain changes.
+
+The current mainnet fixture covers XPQ emission/spend and signed Program
+register, mint, transfer and burn blocks. Legacy asset vectors were replaced;
+the chain-spec identity fixture now locks the reset baseline at version 1.
 
 Add a block-level accounting check:
 

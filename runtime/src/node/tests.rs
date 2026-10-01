@@ -17,8 +17,9 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
         "/balance/{address}",
         "/account/{address}",
         "/coin-origin/{share}",
-        "/asset/{asset}",
-        "/asset/{asset}/balance/{address}",
+        "/program/quote",
+        "/program/asset/{asset}",
+        "/program/asset/{asset}/balance/{address}",
         "/explorer/address/{address}",
         "/explorer/transaction/{transaction_id}",
         "/transaction",
@@ -32,89 +33,6 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
         API_DOCS_HTML
             .windows(b"/openapi.json".len())
             .any(|window| window == b"/openapi.json")
-    );
-}
-
-#[test]
-fn asset_transaction_projection_exposes_asset_and_action() {
-    let chain = kernel::genesis::chain_context().unwrap();
-    let seed =
-        kernel::crypto::SigningSeed::new(kernel::crypto::Signature::MlDsa44, Box::new([0x51; 32]));
-    let public_key = seed.public_key();
-    let signer = kernel::crypto::address_from_public_key(&public_key);
-    let asset_call = kernel::transaction::AssetIntent::new(
-        kernel::transaction::AssetInstruction::Register {
-            name: "Test Token".into(),
-            max_supply: kernel::monetary::asset::Unit::from_units(100_000_000_000_000_000_000_000),
-            initial_mint: kernel::monetary::asset::Unit::from_units(1_000_000),
-            mint_authority: signer,
-            nonce: 0,
-        },
-        signer,
-    );
-    let asset = asset_call.asset().unwrap().to_string();
-    let payment = kernel::transaction::SpendIntent::coin_with_charges(
-        signer,
-        vec![kernel::monetary::coin::CoinShare::from_bytes(
-            [1; kernel::crypto::HASH16_SIZE],
-        )],
-        vec![],
-        kernel::transaction::SpendCharges::new(Zeno::ONE),
-    )
-    .unwrap();
-    let commitment =
-        kernel::transaction::asset_call_commitment(&asset_call, &payment, chain).unwrap();
-    let transaction = kernel::transaction::AuthorizedAssetTransaction {
-        call: asset_call,
-        payment,
-        authorization: kernel::transaction::AccountAuthorization {
-            public_key,
-            signature: seed.sign(commitment.as_bytes()),
-        },
-    };
-    let response = asset_transaction_response(&transaction, Zeno::from_zeno(4_782));
-    assert_eq!(response["asset"], asset);
-    assert_eq!(response["asset_instruction"]["type"], "register");
-    assert_eq!(response["miner_fee"], 1);
-    assert_eq!(response["protocol_burn"], 4_782);
-    assert_eq!(
-        response["asset_instruction"]["max_supply"],
-        "100000000000000000000000"
-    );
-}
-
-#[test]
-fn account_projection_lists_asset_supply_and_creator_shares() {
-    let seed =
-        kernel::crypto::SigningSeed::new(kernel::crypto::Signature::MlDsa44, Box::new([0x61; 32]));
-    let authority = kernel::crypto::address_from_public_key(&seed.public_key());
-    let call = kernel::transaction::AssetIntent::new(
-        kernel::transaction::AssetInstruction::Register {
-            name: "Authority Asset".into(),
-            max_supply: kernel::monetary::asset::Unit::from_units(10),
-            initial_mint: kernel::monetary::asset::Unit::from_units(4),
-            mint_authority: authority,
-            nonce: 0,
-        },
-        authority,
-    );
-    let mut ledger = Ledger::new();
-    ledger
-        .state
-        .assets
-        .apply(&mut ledger.state.utxos, &call, [0; 32])
-        .unwrap();
-
-    let assets = account_asset_balances(&ledger, authority).unwrap();
-    assert_eq!(assets.len(), 1);
-    assert_eq!(assets[0]["max_supply"], "10");
-    assert_eq!(assets[0]["mint"], "4");
-    assert!(assets[0].get("balance").is_none());
-    assert_eq!(assets[0]["shares"].as_array().unwrap().len(), 1);
-    assert_eq!(assets[0]["shares"][0]["amount"], "4");
-    assert!(
-        assets[0]["shares"][0]["share_id"].as_str().unwrap().len()
-            == kernel::crypto::HASH16_SIZE * 2
     );
 }
 

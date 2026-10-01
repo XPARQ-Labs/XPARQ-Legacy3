@@ -1,4 +1,3 @@
-use super::asset::asset_recipient;
 use super::wallet_file::write_private_file_atomically;
 use super::*;
 use std::io::Read;
@@ -13,15 +12,6 @@ mod tests {
         } else {
             "available"
         }
-    }
-
-    #[test]
-    fn asset_recipient_accepts_address() {
-        let address = Address::ZERO;
-        let address_args = vec!["--to".into(), kernel::crypto::address_to_string(&address)];
-        assert_eq!(asset_recipient(&address_args), Ok(address));
-
-        assert!(asset_recipient(&[]).is_err());
     }
 
     #[test]
@@ -132,7 +122,10 @@ mod tests {
             ],
         };
 
-        assert_eq!(format_amount(2 * CoinShare::ZENO_PER_COIN + 1), "2.00000001 XPQ");
+        assert_eq!(
+            format_amount(2 * CoinShare::ZENO_PER_COIN + 1),
+            "2.00000001 XPQ"
+        );
         assert_eq!(utxo_status(&account.utxos[0]), "available");
         assert_eq!(utxo_status(&account.utxos[1]), "available");
         assert_eq!(utxo_status(&account.utxos[2]), "reserved");

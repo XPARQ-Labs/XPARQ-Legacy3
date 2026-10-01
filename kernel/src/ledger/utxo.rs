@@ -3,10 +3,7 @@ use std::{collections::BTreeMap, error::Error as StdError, fmt};
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
 
-use crate::monetary::{
-    asset::{AssetShare, Share},
-    coin::{CoinShare, Zeno},
-};
+use crate::monetary::coin::{CoinShare, Zeno};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CoinUtxo {
@@ -17,7 +14,6 @@ pub struct CoinUtxo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct UtxoSet {
     coins: BTreeMap<CoinShare, CoinUtxo>,
-    shares: BTreeMap<Share, AssetShare>,
 }
 
 impl UtxoSet {
@@ -41,32 +37,12 @@ impl UtxoSet {
         self.coins.iter().map(|(&id, coin)| (id, coin))
     }
 
-    pub fn asset(&self, id: &Share) -> Option<&AssetShare> {
-        self.shares.get(id)
-    }
-
-    pub fn insert_asset(&mut self, id: Share, share: AssetShare) -> Result<(), Error> {
-        if self.shares.contains_key(&id) {
-            return Err(Error::ShareCollision);
-        }
-        self.shares.insert(id, share);
-        Ok(())
-    }
-
-    pub fn consume_asset(&mut self, id: &Share) -> Result<AssetShare, Error> {
-        self.shares.remove(id).ok_or(Error::NotFound)
-    }
-
-    pub fn assets(&self) -> impl Iterator<Item = (Share, &AssetShare)> + '_ {
-        self.shares.iter().map(|(&id, share)| (id, share))
-    }
-
     pub fn len(&self) -> usize {
-        self.coins.len().saturating_add(self.shares.len())
+        self.coins.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.coins.is_empty() && self.shares.is_empty()
+        self.coins.is_empty()
     }
 }
 
@@ -74,7 +50,6 @@ impl UtxoSet {
 pub enum Error {
     NotFound,
     CoinCollision,
-    ShareCollision,
 }
 
 impl fmt::Display for Error {
@@ -82,7 +57,6 @@ impl fmt::Display for Error {
         match self {
             Self::NotFound => f.write_str("UTXO was not found"),
             Self::CoinCollision => f.write_str("coin UTXO ID already exists"),
-            Self::ShareCollision => f.write_str("asset share UTXO ID already exists"),
         }
     }
 }

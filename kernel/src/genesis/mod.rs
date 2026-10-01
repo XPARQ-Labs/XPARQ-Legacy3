@@ -67,7 +67,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 2;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -115,8 +115,9 @@ struct ChainSpecIdentity<'a> {
 
     // Native protocol identity
     native_coin_contract: [u8; HASH_SIZE],
-    native_asset_program: &'a str,
+    extension_asset_program: &'a str,
     transaction_format: &'a str,
+    application_state_format: &'a str,
 }
 
 /// Domain-separated identity of every consensus parameter that nodes must
@@ -167,8 +168,9 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 
         // Native protocol identity
         native_coin_contract: CoinContract::derive().into_bytes(),
-        native_asset_program: "xparq-native-asset-record-nonce-v1",
-        transaction_format: "direct-authorized-v2",
+        extension_asset_program: "xparq-extension-asset-program-v1",
+        transaction_format: "coin-spend-and-program-v1",
+        application_state_format: "coin-utxo-and-extension-state-v1",
     };
 
     let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;
@@ -180,12 +182,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 2);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 1);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                5, 133, 226, 37, 189, 212, 180, 192, 65, 201, 197, 198, 84, 65, 2, 170, 226,
-                121, 80, 218, 199, 76, 86, 51, 101, 16, 3, 180, 12, 235, 149, 217,
+                75, 41, 124, 251, 231, 121, 69, 241, 13, 211, 192, 109, 134, 210, 84, 221, 53, 152,
+                129, 181, 200, 78, 95, 222, 110, 114, 158, 92, 149, 58, 47, 91
             ]
         );
     }

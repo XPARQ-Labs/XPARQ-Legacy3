@@ -5,10 +5,7 @@ use kernel::{
         Address, PublicKey, Signature, SigningSeed, address_from_public_key, address_from_string,
         address_to_string, hash_bytes,
     },
-    transaction::{
-        AccountAuthorization, AccountIntent, AssetIntent, AuthorizedAccountIntent,
-        AuthorizedAssetTransaction, SpendIntent, asset_call_commitment,
-    },
+    transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
 };
 
 use serde::{Deserialize, Serialize};
@@ -271,21 +268,27 @@ impl AccountWallet {
         })
     }
 
-    pub fn sign_asset_call(
+    /// Bind the extension call and its XPQ payment in one authorization.
+    pub fn sign_program_call(
         &self,
-        call: AssetIntent,
-        payment: SpendIntent,
-    ) -> Result<AuthorizedAssetTransaction, String> {
-        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-        let commitment =
-            asset_call_commitment(&call, &payment, chain).map_err(|error| error.to_string())?;
-        let signature = self.signing_seed.sign(commitment.as_bytes());
-        Ok(AuthorizedAssetTransaction {
+        call: extension::script::call::ProgramCall,
+        payment: kernel::transaction::SpendIntent,
+    ) -> Result<kernel::transaction::AuthorizedProgramTransaction, String> {
+        let chain = kernel::genesis::chain_context().map_err(|e| e.to_string())?;
+        let commitment = kernel::transaction::program_transaction_commitment(
+            self.address,
+            &call,
+            &payment,
+            chain,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(kernel::transaction::AuthorizedProgramTransaction {
+            signer: self.address,
             call,
             payment,
-            authorization: AccountAuthorization {
+            authorization: kernel::transaction::AccountAuthorization {
                 public_key: self.public_key.clone(),
-                signature,
+                signature: self.signing_seed.sign(commitment.as_bytes()),
             },
         })
     }

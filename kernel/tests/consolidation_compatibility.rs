@@ -12,12 +12,12 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
         ]
     );
     // The zero-valued native CoinContract is committed to this chain identity.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 2);
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 1);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            5, 133, 226, 37, 189, 212, 180, 192, 65, 201, 197, 198, 84, 65, 2, 170, 226, 121,
-            80, 218, 199, 76, 86, 51, 101, 16, 3, 180, 12, 235, 149, 217
+            75, 41, 124, 251, 231, 121, 69, 241, 13, 211, 192, 109, 134, 210, 84, 221, 53, 152,
+            129, 181, 200, 78, 95, 222, 110, 114, 158, 92, 149, 58, 47, 91
         ]
     );
     assert_ne!(
@@ -38,31 +38,4 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
     assert_eq!(codec::block_bytes(&block).unwrap(), expected);
     assert_eq!(codec::decode_block(&expected).unwrap(), block);
     genesis::genesis_ledger().unwrap();
-}
-
-#[test]
-fn native_asset_and_share_ids_are_frozen() {
-    use kernel::{
-        crypto::{ADDRESS_SIZE, Address},
-        monetary::asset::{AssetContract, Metadata, Share, Unit},
-    };
-    let parent = AssetContract::derive(
-        &Metadata::new(
-            "Test Asset".into(),
-            Unit::from_units(1_000_000),
-            Address([7; ADDRESS_SIZE]),
-            Address([7; ADDRESS_SIZE]),
-        )
-        .unwrap(),
-        0,
-    )
-    .unwrap();
-    assert_eq!(
-        parent.to_string(),
-        "71495bdff294767e0164dd776bad398ad5ebb638263176ff16092dcb369aa4aa"
-    );
-    assert_eq!(
-        Share::derive(parent, [9; 32], 3).to_string(),
-        "881a6a48837e0bc76a91790cd124507c"
-    );
 }

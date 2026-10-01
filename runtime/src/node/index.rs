@@ -60,16 +60,15 @@ fn transaction_addresses(
             )
         }
 
-        AuthorizedTransaction::Asset(transaction) => (
-            transaction.payment.signer,
-            explorer::coin_outputs_with_charges(&transaction.payment, miner),
-        ),
         AuthorizedTransaction::Program(transaction) => (
             transaction.payment.signer,
             explorer::coin_outputs_with_charges(&transaction.payment, miner),
         ),
     };
 
+    if let AuthorizedTransaction::Program(tx) = transaction {
+        addresses.extend(explorer::program_recipients(tx));
+    }
     addresses.insert(sender);
 
     for output in outputs {
@@ -133,8 +132,7 @@ fn ensure_persistent_indexes(path: &Path, ledger: &Ledger) -> Result<(), String>
 
                 hash: block.hash().map_err(|error| error.to_string())?.0,
 
-                bytes: kernel::blockchain::block_bytes(block)
-                    .map_err(|error| error.to_string())?,
+                bytes: kernel::blockchain::block_bytes(block).map_err(|error| error.to_string())?,
 
                 transactions: block
                     .transactions()

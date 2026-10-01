@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{Address, HASH_SIZE};
@@ -30,8 +30,11 @@ pub struct ExecutionContext {
     pub commitment: [u8; HASH_SIZE],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetJournal(AssetState);
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AssetJournal {
+    records: Vec<(AssetContract, Option<AssetRecord>)>,
+    shares: Vec<(Share, Option<AssetShare>)>,
+}
 
 impl AssetState {
     pub fn apply(
@@ -50,12 +53,55 @@ impl AssetState {
         super::decode(opcode as u8, &payload).map_err(|_| AssetError::InvalidProgram)?;
         let mut next = self.clone();
         next.execute(call, context)?;
-        let previous = std::mem::replace(self, next);
-        Ok(AssetJournal(previous))
+        let record_keys: BTreeSet<_> = self
+            .records
+            .keys()
+            .chain(next.records.keys())
+            .copied()
+            .collect();
+        let share_keys: BTreeSet<_> = self
+            .shares
+            .keys()
+            .chain(next.shares.keys())
+            .copied()
+            .collect();
+        let journal = AssetJournal {
+            records: record_keys
+                .into_iter()
+                .filter(|key| self.records.get(key) != next.records.get(key))
+                .map(|key| (key, self.records.get(&key).cloned()))
+                .collect(),
+            shares: share_keys
+                .into_iter()
+                .filter(|key| self.shares.get(key) != next.shares.get(key))
+                .map(|key| (key, self.shares.get(&key).cloned()))
+                .collect(),
+        };
+        *self = next;
+        Ok(journal)
     }
 
     pub fn rollback(&mut self, journal: AssetJournal) {
-        *self = journal.0;
+        for (key, previous) in journal.records {
+            match previous {
+                Some(record) => {
+                    self.records.insert(key, record);
+                }
+                None => {
+                    self.records.remove(&key);
+                }
+            }
+        }
+        for (key, previous) in journal.shares {
+            match previous {
+                Some(share) => {
+                    self.shares.insert(key, share);
+                }
+                None => {
+                    self.shares.remove(&key);
+                }
+            }
+        }
     }
 
     fn input_total(
@@ -286,7 +332,7 @@ mod tests {
             mint_authority: owner,
             nonce: 7,
         };
-        state
+        let register_journal = state
             .apply(&AssetCall::Register(register.clone()), context(owner, 1))
             .unwrap();
         let metadata = Metadata::new(register.name, register.max_supply, owner, owner).unwrap();
@@ -304,7 +350,7 @@ mod tests {
             Err(AssetError::Unauthorized)
         );
         assert_eq!(state, before);
-        state.apply(&mint, context(owner, 2)).unwrap();
+        let mint_journal = state.apply(&mint, context(owner, 2)).unwrap();
         let second = Share::derive(asset, [2; HASH_SIZE], 0);
         let transfer = AssetCall::Transfer(Transfer {
             asset,
@@ -322,7 +368,7 @@ mod tests {
         assert_eq!(state.shares.get(&received).unwrap().owner, receiver);
         state.rollback(journal);
         assert_eq!(state, before);
-        state.apply(&transfer, context(owner, 3)).unwrap();
+        let transfer_journal = state.apply(&transfer, context(owner, 3)).unwrap();
         let burn = AssetCall::Burn(Burn {
             asset,
             inputs: vec![received],
@@ -333,8 +379,18 @@ mod tests {
             state.apply(&burn, context(owner, 4)),
             Err(AssetError::Unauthorized)
         );
-        state.apply(&burn, context(receiver, 4)).unwrap();
+        let burn_journal = state.apply(&burn, context(receiver, 4)).unwrap();
         assert_eq!(state.records[&asset].supply, Unit::from_units(50));
         assert_eq!(state.records[&asset].total_burned, Unit::from_units(10));
+        for journal in [
+            burn_journal,
+            transfer_journal,
+            mint_journal,
+            register_journal,
+        ] {
+            let encoded = borsh::to_vec(&journal).unwrap();
+            state.rollback(AssetJournal::try_from_slice(&encoded).unwrap());
+        }
+        assert_eq!(state, AssetState::default());
     }
 }

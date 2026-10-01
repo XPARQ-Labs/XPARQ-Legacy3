@@ -8,14 +8,10 @@ use crate::{
         BurnError, ProtocolBurn, StateTransitionWeight, created_coin_output_count,
         validate_exact_burn,
     },
-    monetary::{
-        asset::{AssetError, AssetShare, Share},
-        coin::{CoinOutput, CoinShare, Zeno},
-    },
+    monetary::coin::{CoinOutput, CoinShare, Zeno},
     transaction::{
-        AssetInstruction, AssetIntent, AuthorizedAccountIntent, AuthorizedTransaction, IntentError,
-        MAX_TRANSACTION_SIZE, Spend, SpendIntent, SpendIntentCommitment,
-        Transaction as OnChainTransaction,
+        AuthorizedAccountIntent, AuthorizedTransaction, IntentError, MAX_TRANSACTION_SIZE, Spend,
+        SpendIntent, SpendIntentCommitment, Transaction as OnChainTransaction,
     },
 };
 
@@ -89,24 +85,12 @@ impl<T> AuthorizationValidated<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidatedTransaction {
     CoinSpend(ValidatedCoinSpend),
-    CombinedSpend(ValidatedCombinedSpend),
-    AssetCall(ValidatedAssetCall),
+    Program(crate::program::PreparedProgramTransaction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedCoinSpend {
     pub spend: AuthorizationValidated<SpendIntent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedCombinedSpend {
-    pub spend: AuthorizationValidated<SpendIntent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedAssetCall {
-    pub call: AuthorizationValidated<AssetIntent>,
-    pub payment: AuthorizationValidated<SpendIntent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,23 +100,11 @@ pub struct CoinInputState {
 }
 
 pub trait TransactionStateView {
-    fn coin(&self, id: CoinShare) -> Option<CoinInputState>;
-
-    fn asset_share(&self, _id: Share) -> Option<AssetShare> {
+    fn extension_state(&self) -> Option<&extension::script::state::ExtensionState> {
         None
     }
 
-    fn asset_spend_created_state_weight(&self, _intent: &SpendIntent) -> Result<u64, AssetError> {
-        Err(AssetError::UnknownAsset)
-    }
-
-    fn asset_transition_created_state_weight(
-        &self,
-        _call: &AssetIntent,
-        _genesis_hash: [u8; 32],
-    ) -> Result<u64, AssetError> {
-        Err(AssetError::UnknownAsset)
-    }
+    fn coin(&self, id: CoinShare) -> Option<CoinInputState>;
 }
 
 pub fn validate_transaction(
@@ -160,6 +132,10 @@ pub fn validate_transaction(
 
     validate_authorization_gate(&transaction, chain, current_height)?;
 
+    if let AuthorizedTransaction::Program(tx) = transaction {
+        return crate::program::prepare_program_transaction(*tx, chain, current_height, state)
+            .map(ValidatedTransaction::Program);
+    }
     validate_authorized_transaction(transaction, chain, canonical_transaction_weight, state)
 }
 
@@ -222,87 +198,11 @@ fn validate_authorized_transaction(
                         spend,
                     }))
                 }
-
-                Spend::Combined {
-                    coin_inputs,
-                    coin_outputs,
-                    asset_inputs,
-                    ..
-                } => {
-                    validate_share_ownership(asset_inputs, spend.intent().signer, state)?;
-                    let actual_burn = validate_coin_inputs(
-                        coin_inputs,
-                        coin_outputs,
-                        spend.intent().charges.miner_fee,
-                        spend.intent().signer,
-                        state,
-                    )?;
-                    let asset_weight = state
-                        .asset_spend_created_state_weight(spend.intent())
-                        .map_err(TransactionConsensusError::Asset)?;
-                    validate_required_burn(
-                        actual_burn,
-                        StateTransitionWeight {
-                            created_coin_utxos: count_coin_outputs(
-                                coin_outputs,
-                                spend.intent().charges.miner_fee,
-                            )?,
-                            consumed_coin_utxos: count_inputs(coin_inputs.len())?,
-                            created_state_weight: asset_weight,
-                        },
-                        canonical_transaction_weight,
-                    )?;
-                    Ok(ValidatedTransaction::CombinedSpend(
-                        ValidatedCombinedSpend { spend },
-                    ))
-                }
             }
         }
-
-        AuthorizedTransaction::Asset(transaction) => {
-            let transaction = *transaction;
-
-            let call = prepare_asset_intent(transaction.call, chain)?;
-
-            if let AssetInstruction::Burn { inputs, .. } = &call.intent().instruction {
-                validate_share_ownership(inputs, call.intent().signer, state)?;
-            }
-
-            let asset_created_state_weight = state
-                .asset_transition_created_state_weight(call.intent(), chain.genesis_hash)
-                .map_err(TransactionConsensusError::Asset)?;
-
-            let payment = prepare_unsigned_spend_intent(transaction.payment, chain)?;
-
-            let (payment_inputs, payment_outputs) = coin_parts(payment.intent())?;
-
-            let actual_burn = validate_coin_inputs(
-                payment_inputs,
-                payment_outputs,
-                payment.intent().charges.miner_fee,
-                payment.intent().signer,
-                state,
-            )?;
-
-            validate_required_burn(
-                actual_burn,
-                StateTransitionWeight {
-                    created_coin_utxos: count_coin_outputs(
-                        payment_outputs,
-                        payment.intent().charges.miner_fee,
-                    )?,
-                    consumed_coin_utxos: count_inputs(payment_inputs.len())?,
-                    created_state_weight: asset_created_state_weight,
-                },
-                canonical_transaction_weight,
-            )?;
-
-            Ok(ValidatedTransaction::AssetCall(ValidatedAssetCall {
-                call,
-                payment,
-            }))
+        AuthorizedTransaction::Program(_) => {
+            unreachable!("Program envelopes are validated before dispatch")
         }
-        AuthorizedTransaction::Program(_) => Err(TransactionConsensusError::ProgramNotActive),
     }
 }
 
@@ -310,7 +210,7 @@ fn count_inputs(len: usize) -> Result<u64, TransactionConsensusError> {
     u64::try_from(len).map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))
 }
 
-fn count_coin_outputs(
+pub(crate) fn count_coin_outputs(
     outputs: &[CoinOutput],
     miner_fee: Zeno,
 ) -> Result<u64, TransactionConsensusError> {
@@ -319,15 +219,7 @@ fn count_coin_outputs(
         .ok_or(TransactionConsensusError::Burn(BurnError::WeightOverflow))
 }
 
-fn coin_parts(
-    intent: &SpendIntent,
-) -> Result<(&[CoinShare], &[CoinOutput]), TransactionConsensusError> {
-    intent.coin_parts().ok_or(TransactionConsensusError::Intent(
-        IntentError::InvalidAssetCall,
-    ))
-}
-
-fn validate_required_burn(
+pub(crate) fn validate_required_burn(
     actual: Zeno,
     transition: StateTransitionWeight,
     canonical_transaction_weight: u64,
@@ -337,28 +229,6 @@ fn validate_required_burn(
 
     validate_exact_burn(actual, required)?;
     Ok(())
-}
-
-fn prepare_asset_intent(
-    intent: AssetIntent,
-    chain: ChainContext,
-) -> Result<AuthorizationValidated<AssetIntent>, TransactionConsensusError> {
-    //
-    // Signature verification already happened at the transaction-level gate.
-    // This commitment is the semantic commitment used by ledger object IDs,
-    // NOT an authorization commitment.
-    //
-    intent
-        .validate_structure()
-        .map_err(TransactionConsensusError::Asset)?;
-
-    let commitment = SpendIntentCommitment::from_bytes(
-        intent
-            .semantic_commitment(chain.genesis_hash)
-            .map_err(TransactionConsensusError::Asset)?,
-    );
-
-    Ok(AuthorizationValidated { intent, commitment })
 }
 
 fn prepare_spend_intent(
@@ -376,18 +246,7 @@ fn prepare_spend_intent(
     Ok(AuthorizationValidated { intent, commitment })
 }
 
-fn prepare_unsigned_spend_intent(
-    intent: SpendIntent,
-    chain: ChainContext,
-) -> Result<AuthorizationValidated<SpendIntent>, TransactionConsensusError> {
-    let validated = validate_intent(intent, chain)?;
-    Ok(AuthorizationValidated {
-        commitment: validated.commitment(),
-        intent: validated.into_intent(),
-    })
-}
-
-fn validate_coin_inputs(
+pub(crate) fn validate_coin_inputs(
     inputs: &[CoinShare],
     outputs: &[CoinOutput],
     miner_fee: Zeno,
@@ -423,32 +282,6 @@ fn validate_coin_inputs(
         .ok_or(TransactionConsensusError::ValueMismatch)
 }
 
-fn validate_share_ownership(
-    inputs: &[Share],
-    signer: Address,
-    state: &impl TransactionStateView,
-) -> Result<(), TransactionConsensusError> {
-    let mut unique = BTreeSet::new();
-
-    for id in inputs {
-        if !unique.insert(*id) {
-            return Err(TransactionConsensusError::Intent(
-                IntentError::DuplicateInput,
-            ));
-        }
-
-        let share = state
-            .asset_share(*id)
-            .ok_or(TransactionConsensusError::OwnershipProofMissing)?;
-
-        if share.owner != signer {
-            return Err(TransactionConsensusError::RecipientMismatch);
-        }
-    }
-
-    Ok(())
-}
-
 fn ensure_unique_coin_ids(
     ids: impl IntoIterator<Item = CoinShare>,
 ) -> Result<(), TransactionConsensusError> {
@@ -467,16 +300,13 @@ fn ensure_unique_coin_ids(
 pub enum TransactionConsensusError {
     Encoding,
     TransactionTooLarge,
-    ProgramNotActive,
     Intent(IntentError),
     InvalidAuthorization,
     SignatureSchemeInactive,
     UtxoNotFound,
-    OwnershipProofMissing,
     RecipientMismatch,
     ZenoOverflow,
     ValueMismatch,
-    Asset(AssetError),
     Burn(BurnError),
 }
 
@@ -487,7 +317,6 @@ impl fmt::Display for TransactionConsensusError {
             Self::TransactionTooLarge => {
                 formatter.write_str("transaction exceeds consensus size limit")
             }
-            Self::ProgramNotActive => formatter.write_str("program transactions are not active"),
             Self::Intent(error) => write!(formatter, "invalid transaction intent: {error}"),
             Self::InvalidAuthorization => {
                 formatter.write_str("transaction authorization is invalid")
@@ -496,9 +325,7 @@ impl fmt::Display for TransactionConsensusError {
                 formatter.write_str("transaction signature scheme is not active at this height")
             }
             Self::UtxoNotFound => formatter.write_str("transaction input UTXO was not found"),
-            Self::OwnershipProofMissing => {
-                formatter.write_str("transaction input ownership proof is unavailable")
-            }
+
             Self::RecipientMismatch => {
                 formatter.write_str("transaction input is not committed to this signer")
             }
@@ -506,7 +333,6 @@ impl fmt::Display for TransactionConsensusError {
             Self::ValueMismatch => {
                 formatter.write_str("transaction outputs exceed canonical input value")
             }
-            Self::Asset(error) => write!(formatter, "invalid monetary asset transaction: {error}"),
             Self::Burn(error) => write!(formatter, "invalid protocol burn: {error}"),
         }
     }
@@ -529,13 +355,8 @@ mod p3e_authorization_gate_tests {
     };
 
     use crate::{
-        monetary::{
-            asset::{AssetContract, AssetOutput, Share, Unit},
-            coin::{CoinOutput, Zeno},
-        },
-        transaction::{
-            AccountAuthorization, AccountIntent, AuthorizedAssetTransaction, asset_call_commitment,
-        },
+        monetary::coin::{CoinOutput, Zeno},
+        transaction::{AccountAuthorization, AccountIntent},
     };
 
     const TEST_HEIGHT: u64 = 0;
@@ -563,21 +384,6 @@ mod p3e_authorization_gate_tests {
         .expect("valid coin fixture")
     }
 
-    fn asset_call_intent(seed: &SigningSeed, nonce: u64) -> AssetIntent {
-        let owner = signer(seed);
-
-        AssetIntent::new(
-            AssetInstruction::Register {
-                name: "P3E".into(),
-                max_supply: Unit::from_units(1_000_000),
-                initial_mint: Unit::from_units(100),
-                mint_authority: owner,
-                nonce,
-            },
-            owner,
-        )
-    }
-
     fn authorize_principal<T: AccountIntent>(
         intent: T,
         signer_seed: &SigningSeed,
@@ -596,24 +402,6 @@ mod p3e_authorization_gate_tests {
         }
     }
 
-    fn authorize_asset_call(
-        call: AssetIntent,
-        payment: SpendIntent,
-        owner: &SigningSeed,
-        chain: ChainContext,
-    ) -> AuthorizedAssetTransaction {
-        let commitment = asset_call_commitment(&call, &payment, chain).unwrap();
-
-        AuthorizedAssetTransaction {
-            call,
-            payment,
-            authorization: AccountAuthorization {
-                public_key: owner.public_key(),
-                signature: owner.sign(commitment.as_bytes()),
-            },
-        }
-    }
-
     #[test]
     fn valid_direct_spend_passes_consensus_authorization_gate() {
         let owner = seed(1);
@@ -624,35 +412,6 @@ mod p3e_authorization_gate_tests {
             AuthorizedTransaction::Spend(Box::new(authorize_principal(intent, &owner, chain)));
 
         assert!(validate_authorization_gate(&transaction, chain, TEST_HEIGHT).is_ok());
-    }
-
-    #[test]
-    fn oversized_transaction_is_rejected_before_signature_verification() {
-        struct EmptyState;
-        impl TransactionStateView for EmptyState {
-            fn coin(&self, _: CoinShare) -> Option<CoinInputState> {
-                None
-            }
-        }
-
-        let owner = seed(42);
-        let chain = chain(42);
-        let mut authorized = authorize_principal(coin_intent(&owner, 1, 1), &owner, chain);
-        let address = signer(&owner);
-        authorized.intent = SpendIntent::combined(
-            address,
-            vec![CoinShare::from_bytes([1; HASH16_SIZE])],
-            vec![CoinOutput::new(address, Zeno::from_zeno(1)); 4096],
-            AssetContract::from_bytes([2; HASH_SIZE]),
-            vec![Share::from_bytes([3; HASH16_SIZE])],
-            vec![AssetOutput::new(address, Unit::from_units(1)); 4096],
-        )
-        .unwrap();
-        let transaction = AuthorizedTransaction::Spend(Box::new(authorized));
-        assert!(matches!(
-            validate_transaction(transaction, chain, TEST_HEIGHT, &EmptyState),
-            Err(TransactionConsensusError::TransactionTooLarge)
-        ));
     }
 
     #[test]
@@ -667,51 +426,6 @@ mod p3e_authorization_gate_tests {
 
         assert!(matches!(
             validate_authorization_gate(&transaction, chain_b, TEST_HEIGHT),
-            Err(TransactionConsensusError::InvalidAuthorization)
-        ));
-    }
-
-    #[test]
-    fn direct_spend_signature_cannot_be_used_as_asset_call_payment_in_consensus() {
-        let caller = seed(3);
-        let chain = chain(0x31);
-
-        let call = asset_call_intent(&caller, 7);
-        let payment = coin_intent(&caller, 3, 20);
-        let wrong_commitment = payment.principal_commitment(chain).unwrap();
-
-        let transaction = AuthorizedTransaction::Asset(Box::new(AuthorizedAssetTransaction {
-            call,
-            payment,
-            authorization: AccountAuthorization {
-                public_key: caller.public_key(),
-                signature: caller.sign(wrong_commitment.as_bytes()),
-            },
-        }));
-
-        assert!(matches!(
-            validate_authorization_gate(&transaction, chain, TEST_HEIGHT),
-            Err(TransactionConsensusError::InvalidAuthorization)
-        ));
-    }
-
-    #[test]
-    fn asset_call_payment_cannot_be_detached_to_another_parent_in_consensus() {
-        let caller = seed(5);
-        let chain = chain(0x41);
-
-        let call_a = asset_call_intent(&caller, 1);
-        let call_b = asset_call_intent(&caller, 2);
-        let payment = coin_intent(&caller, 4, 30);
-        let signed = authorize_asset_call(call_a, payment, &caller, chain);
-
-        let forged = AuthorizedTransaction::Asset(Box::new(AuthorizedAssetTransaction {
-            call: call_b,
-            ..signed
-        }));
-
-        assert!(matches!(
-            validate_authorization_gate(&forged, chain, TEST_HEIGHT),
             Err(TransactionConsensusError::InvalidAuthorization)
         ));
     }

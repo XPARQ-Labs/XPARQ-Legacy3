@@ -173,13 +173,11 @@ mod ledger_errors {
     //! Ledger state-transition errors.
 
     use crate::ledger::utxo;
-    use crate::monetary::asset::AssetError;
     use std::{error::Error as StdError, fmt};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum StateError {
         Utxo(utxo::Error),
-        Asset(AssetError),
         InvalidTransaction,
         OutputIndexOverflow,
         BurnOverflow,
@@ -191,7 +189,6 @@ mod ledger_errors {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::Utxo(error) => write!(formatter, "UTXO transition failed: {error}"),
-                Self::Asset(error) => write!(formatter, "asset transition failed: {error}"),
                 Self::InvalidTransaction => {
                     formatter.write_str("invalid transaction state transition")
                 }
@@ -208,11 +205,6 @@ mod ledger_errors {
     impl From<utxo::Error> for StateError {
         fn from(error: utxo::Error) -> Self {
             Self::Utxo(error)
-        }
-    }
-    impl From<AssetError> for StateError {
-        fn from(error: AssetError) -> Self {
-            Self::Asset(error)
         }
     }
 }

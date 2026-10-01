@@ -14,7 +14,7 @@ mod header;
 mod policy;
 mod pow;
 mod target;
-mod transaction;
+pub(crate) mod transaction;
 
 pub use crate::error::ConsensusError;
 pub use block::*;

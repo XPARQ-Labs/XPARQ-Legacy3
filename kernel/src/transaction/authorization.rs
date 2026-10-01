@@ -7,7 +7,7 @@ use crypto::{
 use extension::script::{call::ProgramCall, execute::decode_program};
 
 use crate::common::ChainContext;
-use crate::transaction::{AssetIntent, IntentError, Spend, SpendIntent, TransactionEncodingError};
+use crate::transaction::{IntentError, Spend, SpendIntent, TransactionEncodingError};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -79,14 +79,11 @@ impl TransactionId {
 const TRANSACTION_INTENT_ID_TAG: [u8; 27] = *b"xparq:transaction-intent:v1";
 
 const INTENT_KIND_COIN_SPEND: u8 = 1;
-const INTENT_KIND_COMBINED_SPEND: u8 = 2;
-const INTENT_KIND_ASSET_CALL: u8 = 3;
 const INTENT_KIND_PROGRAM_CALL: u8 = 4;
 
 /// Something that can be authorized by an account.
 ///
-/// Coin and asset spends both use the same Principal role.
-/// Their canonical encodings remain different because Spend is an enum.
+/// Native coin spends use the Principal authorization role.
 pub trait AccountIntent {
     fn sender(&self) -> Address;
 
@@ -112,27 +109,6 @@ impl AccountIntent for SpendIntent {
 
         Ok(AuthorizationCommitment::from_bytes(
             domain(HashDomain::SpendIntent, &bytes).into_bytes(),
-        ))
-    }
-}
-
-impl AccountIntent for AssetIntent {
-    fn sender(&self) -> Address {
-        self.signer
-    }
-
-    fn principal_commitment(
-        &self,
-        chain: ChainContext,
-    ) -> Result<AuthorizationCommitment, IntentError> {
-        self.validate_structure()
-            .map_err(|_| IntentError::InvalidAssetCall)?;
-
-        let bytes = canonical_bytes(&(chain.genesis_hash, AuthorizationRole::Principal, self))
-            .map_err(|_| IntentError::Encoding)?;
-
-        Ok(AuthorizationCommitment::from_bytes(
-            domain(HashDomain::AssetIntent, &bytes).into_bytes(),
         ))
     }
 }
@@ -184,13 +160,6 @@ impl<T: AccountIntent> AuthorizedAccountIntent<T> {
             .authorization
             .verify_commitment(self.intent.sender(), &commitment, height))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct AuthorizedAssetTransaction {
-    pub call: AssetIntent,
-    pub payment: SpendIntent,
-    pub authorization: AccountAuthorization,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -251,23 +220,9 @@ pub fn program_transaction_commitment(
     ))
 }
 
-impl AuthorizedAssetTransaction {
-    pub fn verify_authorizations(
-        &self,
-        chain: ChainContext,
-        height: u64,
-    ) -> Result<bool, IntentError> {
-        let commitment = asset_call_commitment(&self.call, &self.payment, chain)?;
-        Ok(self
-            .authorization
-            .verify_commitment(self.call.signer, &commitment, height))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum AuthorizedTransaction {
     Spend(Box<AuthorizedAccountIntent<SpendIntent>>),
-    Asset(Box<AuthorizedAssetTransaction>),
     Program(Box<AuthorizedProgramTransaction>),
 }
 
@@ -291,20 +246,8 @@ impl AuthorizedTransaction {
                     INTENT_KIND_COIN_SPEND,
                     &tx.intent,
                 )),
-
-                Spend::Combined { .. } => canonical_bytes(&(
-                    TRANSACTION_INTENT_ID_TAG,
-                    INTENT_KIND_COMBINED_SPEND,
-                    &tx.intent,
-                )),
             },
 
-            Self::Asset(tx) => canonical_bytes(&(
-                TRANSACTION_INTENT_ID_TAG,
-                INTENT_KIND_ASSET_CALL,
-                &tx.call,
-                &tx.payment,
-            )),
             Self::Program(tx) => canonical_bytes(&(
                 TRANSACTION_INTENT_ID_TAG,
                 INTENT_KIND_PROGRAM_CALL,
@@ -328,7 +271,6 @@ impl AuthorizedTransaction {
         match self {
             Self::Spend(tx) => tx.intent.validate(),
 
-            Self::Asset(tx) => asset_call_structure(&tx.call, &tx.payment),
             Self::Program(tx) => tx.validate_structure(),
         }
     }
@@ -343,43 +285,9 @@ impl AuthorizedTransaction {
         match self {
             Self::Spend(tx) => tx.verify_principal(chain, height),
 
-            Self::Asset(tx) => tx.verify_authorizations(chain, height),
             Self::Program(tx) => tx.verify_authorizations(chain, height),
         }
     }
-}
-
-fn asset_call_structure(call: &AssetIntent, payment: &SpendIntent) -> Result<(), IntentError> {
-    call.validate_structure()
-        .map_err(|_| IntentError::InvalidAssetCall)?;
-    payment.validate()?;
-    if call.signer != payment.signer || !matches!(&payment.spend, Spend::Coin { .. }) {
-        return Err(IntentError::InvalidAssetCall);
-    }
-
-    Ok(())
-}
-
-/// One signature authorizes the asset operation and its XPQ payment together.
-pub fn asset_call_commitment(
-    call: &AssetIntent,
-    payment: &SpendIntent,
-    chain: ChainContext,
-) -> Result<AuthorizationCommitment, IntentError> {
-    asset_call_structure(call, payment)?;
-
-    let bytes = canonical_bytes(&(
-        chain.genesis_hash,
-        AuthorizationRole::Principal,
-        b"xparq:asset-call-authorization:v1",
-        call,
-        payment,
-    ))
-    .map_err(|_| IntentError::Encoding)?;
-
-    Ok(AuthorizationCommitment::from_bytes(
-        domain(HashDomain::AssetIntent, &bytes).into_bytes(),
-    ))
 }
 
 #[cfg(test)]
@@ -405,7 +313,7 @@ mod program_transaction_tests {
     }
 
     #[test]
-    fn program_envelope_binds_payment_and_is_inactive_in_consensus() {
+    fn program_envelope_binds_payment_and_requires_state_view() {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([14; 32]));
         let signer = address_from_public_key(&seed.public_key());
         let chain = ChainContext::new([8; HASH_SIZE]);
@@ -454,7 +362,9 @@ mod program_transaction_tests {
         );
         assert!(matches!(
             validate_transaction(transaction, chain, 0, &EmptyState),
-            Err(TransactionConsensusError::ProgramNotActive)
+            Err(TransactionConsensusError::Intent(
+                IntentError::InvalidAssetCall
+            ))
         ));
     }
 }

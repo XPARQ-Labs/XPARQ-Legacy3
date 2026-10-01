@@ -72,14 +72,13 @@ pub(super) fn account_response(
         kernel::crypto::HashDomain::AccountState,
         &utxo_snapshot_bytes,
     );
-    let assets = account_asset_balances(ledger, address)?;
     Ok(serde_json::json!({
         "address": kernel::crypto::address_to_string(&address),
         "utxo_snapshot": hex::encode(utxo_snapshot.0),
         "tip_height": ledger.tip_height().map_or(0, |height| height.0),
         "next_height": next_height,
         "total": total.as_zeno(),
-        "assets": assets,
+        "program_assets": program_account_assets(ledger, address)?,
         "utxos": utxos,
         "next_utxo_offset": next_utxo_offset,
         "next_utxo_cursor": next_utxo_cursor,
@@ -123,64 +122,8 @@ pub(super) fn balance_response(
         "available": available.as_zeno(),
         "reserved": reserved.as_zeno(),
         "utxo_count": utxo_count,
-        "assets": account_asset_balances(ledger, address)?,
+        "program_assets": program_account_assets(ledger, address)?,
     }))
-}
-
-pub(super) fn account_asset_balances(
-    ledger: &Ledger,
-    address: Address,
-) -> Result<Vec<serde_json::Value>, String> {
-    let mut assets = std::collections::BTreeSet::new();
-    for (asset, metadata) in ledger.state().assets.metadata_entries() {
-        if metadata.creator == address || metadata.mint_authority == address {
-            assets.insert(asset);
-        }
-    }
-    for (_, utxo) in ledger.state().utxos.assets() {
-        if utxo.owner != address || utxo.amount.is_zero() {
-            continue;
-        }
-        assets.insert(utxo.asset);
-    }
-    let mut response = Vec::with_capacity(assets.len());
-    for asset in assets {
-        let metadata = ledger
-            .state()
-            .assets
-            .metadata(asset)
-            .ok_or("asset balance references missing metadata")?;
-        let mint = ledger.state().assets.supply(asset);
-        let shares = account_asset_shares(ledger, asset, address);
-        response.push(serde_json::json!({
-            "asset": asset.to_string(),
-            "name": metadata.name,
-            "max_supply": metadata.max_supply.to_string(),
-            "mint": mint.to_string(),
-            "shares": shares,
-        }));
-    }
-    Ok(response)
-}
-
-pub(super) fn account_asset_shares(
-    ledger: &Ledger,
-    asset: kernel::monetary::asset::AssetContract,
-    address: Address,
-) -> Vec<serde_json::Value> {
-    ledger
-        .state()
-        .utxos
-        .assets()
-        .filter(|(_, share)| share.asset == asset && share.owner == address)
-        .map(|(share_id, share)| {
-            serde_json::json!({
-                "share_id": share_id.to_string(),
-                "amount": share.amount.to_string(),
-                "owner": asset_owner_response(address),
-            })
-        })
-        .collect()
 }
 
 pub(super) fn explorer_address_response(
@@ -283,6 +226,7 @@ pub(super) fn explorer_address_response(
             "total": total.as_zeno(),
             "reserved": reserved.as_zeno(),
         },
+        "program_assets": program_asset_summaries(ledger, address)?,
         "activity_count": activities.len(),
         "emission_count": emission_count,
         "activities": activities,
@@ -307,11 +251,6 @@ pub(super) fn address_transaction_activity(
                 Zeno::ZERO,
             )
         }
-        AuthorizedTransaction::Asset(tx) => (
-            Some(tx.payment.signer),
-            coin_outputs_with_charges(&tx.payment, miner),
-            coin_burn(&tx.payment),
-        ),
         AuthorizedTransaction::Program(tx) => (
             Some(tx.payment.signer),
             coin_outputs_with_charges(&tx.payment, miner),
@@ -343,6 +282,9 @@ pub(super) fn address_transaction_activity(
         )
     } else if received.as_zeno() > 0 {
         ("in", received)
+    } else if matches!(transaction, AuthorizedTransaction::Program(tx) if program_recipients(tx).contains(&address))
+    {
+        ("in", Zeno::ZERO)
     } else {
         return Ok(None);
     };
@@ -351,6 +293,7 @@ pub(super) fn address_transaction_activity(
         "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
         "hash": hex::encode(transaction.id().map_err(|error| error.to_string())?),
         "type": transaction_kind(transaction),
+        "program": match transaction {AuthorizedTransaction::Program(tx)=>Some(program_activity_response(tx,address)),_=>None},
         "direction": direction,
         "amount": amount.as_zeno(),
         "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
@@ -417,15 +360,10 @@ pub(super) fn transaction_response(
 ) -> serde_json::Value {
     match transaction {
         AuthorizedTransaction::Spend(spend) => spend_transaction_response(spend, protocol_burn),
-        AuthorizedTransaction::Asset(asset) => asset_transaction_response(asset, protocol_burn),
-        AuthorizedTransaction::Program(program) => serde_json::json!({
-            "type": "program",
-            "program_id": program.call.program.0,
-            "opcode": program.call.opcode,
-            "payload": hex::encode(&program.call.payload),
-            "signer": kernel::crypto::address_to_string(&program.signer),
-            "protocol_burn": protocol_burn.as_zeno(),
-        }),
+
+        AuthorizedTransaction::Program(program) => {
+            program_transaction_response(program, protocol_burn)
+        }
     }
 }
 
@@ -460,64 +398,7 @@ pub(super) fn spend_transaction_response(
             "miner_fee": transaction.intent.charges.miner_fee.as_zeno(),
             "protocol_burn": protocol_burn.as_zeno(),
         }),
-        kernel::transaction::Spend::Combined {
-            coin_inputs,
-            coin_outputs,
-            asset,
-            asset_inputs,
-            asset_outputs,
-        } => serde_json::json!({
-            "type": "combined", "asset": asset.to_string(),
-            "signer": kernel::crypto::address_to_string(&transaction.intent.signer),
-            "coin_inputs": coin_inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "coin_outputs": public_outputs_response(&coin_outputs, Some(transaction.intent.signer)),
-            "asset_inputs": asset_inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "asset_outputs": asset_outputs.iter().map(|output| serde_json::json!({
-                "owner": asset_owner_response(output.recipient), "amount": output.amount.to_string(),
-            })).collect::<Vec<_>>(),
-            "miner_fee": transaction.intent.charges.miner_fee.as_zeno(),
-            "protocol_burn": protocol_burn.as_zeno(),
-        }),
     }
-}
-
-pub(super) fn asset_transaction_response(
-    transaction: &kernel::transaction::AuthorizedAssetTransaction,
-    protocol_burn: Zeno,
-) -> serde_json::Value {
-    let call = &transaction.call;
-    let instruction = match &call.instruction {
-        kernel::transaction::AssetInstruction::Register {
-            name,
-            max_supply,
-            initial_mint,
-            mint_authority,
-            nonce,
-        } => serde_json::json!({
-            "type": "register", "name": name,
-            "max_supply": max_supply.to_string(), "initial_mint": initial_mint.to_string(),
-            "mint_authority": asset_authority_response(*mint_authority),
-            "recipient": kernel::crypto::address_to_string(&call.signer),
-            "nonce": nonce,
-        }),
-        kernel::transaction::AssetInstruction::Mint {
-            recipient, amount, ..
-        } => serde_json::json!({
-            "type": "mint", "recipient": asset_owner_response(*recipient), "amount": amount.to_string(),
-        }),
-        kernel::transaction::AssetInstruction::Burn { inputs, .. } => {
-            serde_json::json!({ "type": "burn", "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>() })
-        }
-    };
-    serde_json::json!({
-        "asset": call.asset().map(|id| id.to_string()).unwrap_or_else(|_| "invalid".into()),
-        "signer": kernel::crypto::address_to_string(&call.signer),
-        "asset_instruction": instruction,
-        "payment_sender": kernel::crypto::address_to_string(&transaction.payment.signer),
-        "payment_outputs": public_outputs_response(&coin_outputs(&transaction.payment), Some(transaction.payment.signer)),
-        "miner_fee": transaction.payment.charges.miner_fee.as_zeno(),
-        "protocol_burn": protocol_burn.as_zeno(),
-    })
 }
 
 pub(super) fn asset_owner_response(owner: Address) -> serde_json::Value {
@@ -569,61 +450,9 @@ pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
     match transaction {
         AuthorizedTransaction::Spend(spend) => match &spend.intent.spend {
             kernel::transaction::Spend::Coin { .. } => "transfer",
-            kernel::transaction::Spend::Combined { .. } => "asset-transfer",
         },
-        AuthorizedTransaction::Asset(_) => "asset",
         AuthorizedTransaction::Program(_) => "program",
     }
-}
-
-pub(super) fn asset_response(ledger: &Ledger, route: &str) -> Result<serde_json::Value, String> {
-    let path = route.trim_start_matches("/asset/");
-    let parts = path.split('/').collect::<Vec<_>>();
-    let asset = parts
-        .first()
-        .ok_or("missing asset id")?
-        .parse::<kernel::monetary::asset::AssetContract>()
-        .map_err(|_| "invalid asset id")?;
-    if parts.len() == 1 {
-        let metadata = ledger
-            .state()
-            .assets
-            .metadata(asset)
-            .ok_or("asset was not found")?;
-        let supply = ledger.state().assets.supply(asset);
-        let mint_nonce = ledger.state().assets.mint_nonce(asset);
-        let total_minted = ledger.state().assets.total_minted(asset);
-        return Ok(serde_json::json!({
-            "asset": asset.to_string(),
-            "name": metadata.name,
-            "max_supply": metadata.max_supply.to_string(),
-            "supply": supply.to_string(),
-            "total_minted": total_minted.map(|amount| amount.to_string()),
-            "creator": kernel::crypto::address_to_string(&metadata.creator),
-            "mint_authority": asset_authority_response(metadata.mint_authority),
-            "mint_nonce": mint_nonce,
-        }));
-    }
-    if parts.len() == 3 && parts[1] == "balance" {
-        let address = parse_address(parts[2])?;
-        let balance = ledger
-            .state()
-            .utxos
-            .assets()
-            .filter(|(_, share)| share.asset == asset && share.owner == address)
-            .try_fold(kernel::monetary::asset::Unit::ZERO, |total, (_, share)| {
-                total
-                    .checked_add(share.amount)
-                    .ok_or("asset balance overflow")
-            })?;
-        return Ok(serde_json::json!({
-            "asset": asset.to_string(),
-            "address": kernel::crypto::address_to_string(&address),
-            "balance": balance.to_string(),
-            "shares": account_asset_shares(ledger, asset, address),
-        }));
-    }
-    Err("invalid asset route".into())
 }
 
 pub(super) fn asset_authority_response(authority: Address) -> serde_json::Value {
@@ -729,4 +558,190 @@ pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_jso
         "state_burn": state_burn.as_zeno(),
         "miner_emission": miner_emission.as_zeno(),
     }))
+}
+
+fn program_shares(
+    ledger: &Ledger,
+    asset: extension::asset_program::asset::AssetContract,
+    address: Address,
+) -> Vec<serde_json::Value> {
+    ledger.state().extensions.assets.shares.iter()
+        .filter(|(_,s)|s.asset==asset && s.owner==address)
+        .map(|(id,s)|serde_json::json!({"share_id":id.to_string(),"amount":s.amount.to_string(),"owner":asset_owner_response(address)})).collect()
+}
+
+pub(super) fn program_account_assets(
+    ledger: &Ledger,
+    address: Address,
+) -> Result<Vec<serde_json::Value>, String> {
+    let state = &ledger.state().extensions.assets;
+    let mut result = Vec::new();
+    for (asset, record) in &state.records {
+        let shares = program_shares(ledger, *asset, address);
+        if shares.is_empty()
+            && record.metadata.creator != address
+            && record.metadata.mint_authority != address
+        {
+            continue;
+        }
+        result.push(serde_json::json!({"program_id":1,"asset":asset.to_string(),"name":record.metadata.name,"max_supply":record.metadata.max_supply.to_string(),"mint":record.supply.to_string(),"shares":shares}));
+    }
+    Ok(result)
+}
+
+pub(super) fn program_asset_response(
+    ledger: &Ledger,
+    route: &str,
+) -> Result<serde_json::Value, String> {
+    let parts = route
+        .trim_start_matches("/program/asset/")
+        .split('/')
+        .collect::<Vec<_>>();
+    let asset = parts[0]
+        .parse::<extension::asset_program::asset::AssetContract>()
+        .map_err(|_| "invalid program asset id")?;
+    let record = ledger
+        .state()
+        .extensions
+        .assets
+        .records
+        .get(&asset)
+        .ok_or("program asset was not found")?;
+    if parts.len() == 1 {
+        return Ok(
+            serde_json::json!({"program_id":1,"asset":asset.to_string(),"name":record.metadata.name,"max_supply":record.metadata.max_supply.to_string(),"supply":record.supply.to_string(),"total_minted":record.total_minted.to_string(),"total_burned":record.total_burned.to_string(),"creator":kernel::crypto::address_to_string(&record.metadata.creator),"mint_authority":asset_authority_response(record.metadata.mint_authority),"mint_nonce":record.mint_nonce}),
+        );
+    }
+    if parts.len() == 3 && parts[1] == "balance" {
+        let address = parse_address(parts[2])?;
+        let shares = program_shares(ledger, asset, address);
+        let total = ledger
+            .state()
+            .extensions
+            .assets
+            .shares
+            .values()
+            .filter(|s| s.asset == asset && s.owner == address)
+            .try_fold(extension::asset_program::asset::Unit::ZERO, |sum, s| {
+                sum.checked_add(s.amount).ok_or("program balance overflow")
+            })?;
+        return Ok(
+            serde_json::json!({"program_id":1,"asset":asset.to_string(),"address":kernel::crypto::address_to_string(&address),"balance":total.to_string(),"shares":shares}),
+        );
+    }
+    Err("invalid program asset route".into())
+}
+
+fn program_transaction_response(
+    tx: &kernel::transaction::AuthorizedProgramTransaction,
+    burn: Zeno,
+) -> serde_json::Value {
+    use extension::{
+        asset_program::type_::AssetCall,
+        script::execute::{DecodedProgramCall, decode_program},
+    };
+    let instruction = match decode_program(&tx.call) {
+        Ok(DecodedProgramCall::Asset(call)) => match call {
+            AssetCall::Register(v) => {
+                serde_json::json!({"type":"register","name":v.name,"max_supply":v.max_supply.to_string(),"initial_mint":v.initial_mint.to_string(),"mint_authority":asset_authority_response(v.mint_authority),"nonce":v.nonce})
+            }
+            AssetCall::Mint(v) => {
+                serde_json::json!({"type":"mint","asset":v.asset.to_string(),"nonce":v.nonce,"recipient":asset_owner_response(v.recipient),"amount":v.amount.to_string()})
+            }
+            AssetCall::Transfer(v) => {
+                serde_json::json!({"type":"transfer","asset":v.asset.to_string(),"inputs":v.inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),"outputs":v.outputs.iter().map(|o|serde_json::json!({"recipient":asset_owner_response(o.recipient),"amount":o.amount.to_string()})).collect::<Vec<_>>()})
+            }
+            AssetCall::Burn(v) => {
+                serde_json::json!({"type":"burn","asset":v.asset.to_string(),"inputs":v.inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),"amount":v.amount.to_string(),"output":v.output.to_string()})
+            }
+        },
+        Err(_) => serde_json::Value::Null,
+    };
+    serde_json::json!({"type":"program","program_id":tx.call.program.0,"opcode":tx.call.opcode,"payload":hex::encode(&tx.call.payload),"signer":kernel::crypto::address_to_string(&tx.signer),"asset_instruction":instruction,"coin_inputs":tx.payment.coin_parts().map(|(i,_)|i.iter().map(ToString::to_string).collect::<Vec<_>>()),"coin_outputs":coin_outputs(&tx.payment).iter().map(|o|serde_json::json!({"recipient":kernel::crypto::address_to_string(&output_recipient(o)),"amount":o.amount.as_zeno()})).collect::<Vec<_>>(),"miner_fee":tx.payment.charges.miner_fee.as_zeno(),"protocol_burn":burn.as_zeno()})
+}
+
+pub(super) fn program_recipients(
+    tx: &kernel::transaction::AuthorizedProgramTransaction,
+) -> Vec<Address> {
+    use extension::{
+        asset_program::type_::AssetCall,
+        script::execute::{DecodedProgramCall, decode_program},
+    };
+    match decode_program(&tx.call) {
+        Ok(DecodedProgramCall::Asset(AssetCall::Mint(v))) => vec![v.recipient],
+        Ok(DecodedProgramCall::Asset(AssetCall::Transfer(v))) => {
+            v.outputs.iter().map(|o| o.recipient).collect()
+        }
+        _ => vec![],
+    }
+}
+
+fn program_activity_response(
+    tx: &kernel::transaction::AuthorizedProgramTransaction,
+    address: Address,
+) -> serde_json::Value {
+    use extension::{
+        asset_program::{
+            asset::{AssetContract, Metadata},
+            type_::AssetCall,
+        },
+        script::execute::{DecodedProgramCall, decode_program},
+    };
+    let (operation, asset, amount) = match decode_program(&tx.call) {
+        Ok(DecodedProgramCall::Asset(AssetCall::Register(v))) => {
+            let asset = Metadata::new(v.name, v.max_supply, tx.signer, v.mint_authority)
+                .and_then(|m| AssetContract::derive(&m, v.nonce))
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            ("register", asset, v.initial_mint.as_units())
+        }
+        Ok(DecodedProgramCall::Asset(AssetCall::Mint(v))) => {
+            ("mint", v.asset.to_string(), v.amount.as_units())
+        }
+        Ok(DecodedProgramCall::Asset(AssetCall::Transfer(v))) => {
+            let amount = v
+                .outputs
+                .iter()
+                .filter(|o| {
+                    if address == tx.signer {
+                        o.recipient != address
+                    } else {
+                        o.recipient == address
+                    }
+                })
+                .fold(0_u128, |sum, o| sum.saturating_add(o.amount.as_units()));
+            ("transfer", v.asset.to_string(), amount)
+        }
+        Ok(DecodedProgramCall::Asset(AssetCall::Burn(v))) => {
+            ("burn", v.asset.to_string(), v.amount.as_units())
+        }
+        Err(_) => ("invalid", String::new(), 0),
+    };
+    serde_json::json!({"program_id":tx.call.program.0,"opcode":tx.call.opcode,"operation":operation,"asset":asset,"amount":amount.to_string()})
+}
+
+fn program_asset_summaries(
+    ledger: &Ledger,
+    address: Address,
+) -> Result<Vec<serde_json::Value>, String> {
+    program_account_assets(ledger, address)?
+        .into_iter()
+        .map(|mut entry| {
+            let shares = entry.as_object_mut().unwrap().remove("shares").unwrap();
+            let amount = shares
+                .as_array()
+                .unwrap()
+                .iter()
+                .try_fold(0_u128, |sum, s| {
+                    let value = s["amount"]
+                        .as_str()
+                        .ok_or("invalid program balance")?
+                        .parse::<u128>()
+                        .map_err(|_| "invalid program balance")?;
+                    sum.checked_add(value).ok_or("program balance overflow")
+                })?;
+            entry["balance"] = serde_json::Value::String(amount.to_string());
+            Ok(entry)
+        })
+        .collect()
 }

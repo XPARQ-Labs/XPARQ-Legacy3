@@ -13,10 +13,7 @@ use crate::{
         validate_transaction,
     },
     ledger::{CoinUtxo, LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
-    monetary::{
-        asset::{AssetContract, Unit},
-        coin::{CoinShare, Zeno},
-    },
+    monetary::coin::{CoinShare, Zeno},
     transaction::SpendIntent,
 };
 
@@ -208,7 +205,7 @@ impl Ledger {
             state.record_protocol_burn(emission.protocol_burn(), &mut spend)?;
             journals.push(StateRollbackJournal {
                 spend: Some(spend),
-                asset: None,
+                extension: None,
             });
         }
 
@@ -217,8 +214,7 @@ impl Ledger {
                 validate_transaction(transaction.clone(), chain_context, height.0, &state)?;
             let spend = match &validated {
                 ValidatedTransaction::CoinSpend(tx) => tx.spend.intent(),
-                ValidatedTransaction::CombinedSpend(tx) => tx.spend.intent(),
-                ValidatedTransaction::AssetCall(tx) => tx.payment.intent(),
+                ValidatedTransaction::Program(tx) => &tx.transaction.payment,
             };
             let burn = expected_spend_burn(&state, spend)?;
             expected_burns = expected_burns
@@ -232,7 +228,12 @@ impl Ledger {
         }
 
         checkpoint(BlockTransitionPoint::BeforeAccountingCheck, &mut state)?;
-        validate_block_accounting(coin_supply_before, &state, validated_subsidy, expected_burns)?;
+        validate_block_accounting(
+            coin_supply_before,
+            &state,
+            validated_subsidy,
+            expected_burns,
+        )?;
         state.validate_supply_invariants()?;
         let state_root = state.application_state_root()?;
         Ok(ExecutedBlock {
@@ -315,21 +316,39 @@ impl Ledger {
 }
 
 fn coin_utxo_total(state: &LedgerState) -> Result<Zeno, LedgerError> {
-    state.utxos.coins().try_fold(Zeno::ZERO, |total, (_, coin)| {
-        total.checked_add(coin.amount).ok_or(LedgerError::SupplyOverflow)
-    })
+    state
+        .utxos
+        .coins()
+        .try_fold(Zeno::ZERO, |total, (_, coin)| {
+            total
+                .checked_add(coin.amount)
+                .ok_or(LedgerError::SupplyOverflow)
+        })
 }
 
 fn expected_spend_burn(state: &LedgerState, intent: &SpendIntent) -> Result<Zeno, LedgerError> {
-    let (inputs, outputs) = intent.coin_parts().ok_or(LedgerError::BlockAccountingMismatch)?;
+    let (inputs, outputs) = intent
+        .coin_parts()
+        .ok_or(LedgerError::BlockAccountingMismatch)?;
     let input_total = inputs.iter().try_fold(Zeno::ZERO, |total, id| {
-        let coin = state.utxos.coin(id).ok_or(LedgerError::BlockAccountingMismatch)?;
-        total.checked_add(coin.amount).ok_or(LedgerError::SupplyOverflow)
+        let coin = state
+            .utxos
+            .coin(id)
+            .ok_or(LedgerError::BlockAccountingMismatch)?;
+        total
+            .checked_add(coin.amount)
+            .ok_or(LedgerError::SupplyOverflow)
     })?;
-    let output_total = outputs.iter().try_fold(intent.charges.miner_fee, |total, output| {
-        total.checked_add(output.amount).ok_or(LedgerError::SupplyOverflow)
-    })?;
-    input_total.checked_sub(output_total).ok_or(LedgerError::BlockAccountingMismatch)
+    let output_total = outputs
+        .iter()
+        .try_fold(intent.charges.miner_fee, |total, output| {
+            total
+                .checked_add(output.amount)
+                .ok_or(LedgerError::SupplyOverflow)
+        })?;
+    input_total
+        .checked_sub(output_total)
+        .ok_or(LedgerError::BlockAccountingMismatch)
 }
 
 fn validate_block_accounting(
@@ -338,7 +357,8 @@ fn validate_block_accounting(
     subsidy: Zeno,
     burns: Zeno,
 ) -> Result<(), LedgerError> {
-    let expected = before.checked_add(subsidy)
+    let expected = before
+        .checked_add(subsidy)
         .and_then(|total| total.checked_sub(burns))
         .ok_or(LedgerError::BlockAccountingMismatch)?;
     if coin_utxo_total(after)? != expected {
@@ -368,41 +388,15 @@ impl ApplyBlockState for Ledger {
 //
 
 impl TransactionStateView for LedgerState {
+    fn extension_state(&self) -> Option<&extension::script::state::ExtensionState> {
+        Some(&self.extensions)
+    }
+
     fn coin(&self, id: CoinShare) -> Option<CoinInputState> {
         self.utxos.coin(&id).map(|coin| CoinInputState {
             amount: coin.amount,
             owner: coin.owner,
         })
-    }
-
-    fn asset_share(
-        &self,
-        id: crate::monetary::asset::Share,
-    ) -> Option<crate::monetary::asset::AssetShare> {
-        self.utxos.asset(&id).copied()
-    }
-
-    fn asset_spend_created_state_weight(
-        &self,
-        intent: &crate::transaction::SpendIntent,
-    ) -> Result<u64, crate::monetary::asset::AssetError> {
-        let (asset, inputs, outputs) = intent
-            .asset_parts()
-            .ok_or(crate::monetary::asset::AssetError::InvalidProgram)?;
-
-        self.assets
-            .account_transfer_created_state_weight(&self.utxos, asset, inputs, outputs)
-    }
-
-    fn asset_transition_created_state_weight(
-        &self,
-        call: &crate::transaction::AssetIntent,
-        genesis_hash: [u8; 32],
-    ) -> Result<u64, crate::monetary::asset::AssetError> {
-        self.assets
-            .validate_transition(&self.utxos, call, genesis_hash)?;
-
-        call.created_state_weight()
     }
 }
 
@@ -424,20 +418,27 @@ impl LedgerState {
             return Err(LedgerError::CoinSupplyMismatch);
         }
 
-        let mut asset_totals = BTreeMap::<AssetContract, Unit>::new();
-        for (_, share) in self.utxos.assets() {
-            if self.assets.record(share.asset).is_none() {
+        let assets = &self.extensions.assets;
+        let mut totals = BTreeMap::new();
+        for share in assets.shares.values() {
+            if !assets.records.contains_key(&share.asset) {
                 return Err(LedgerError::UnknownAssetShare);
             }
-            let total = asset_totals.entry(share.asset).or_insert(Unit::ZERO);
+            let total = totals
+                .entry(share.asset)
+                .or_insert(extension::asset_program::asset::Unit::ZERO);
             *total = total
                 .checked_add(share.amount)
                 .ok_or(LedgerError::SupplyOverflow)?;
         }
-        for (&asset, record) in &self.assets.assets {
+        for (asset, record) in &assets.records {
             if record.total_minted > record.metadata.max_supply
                 || record.total_minted.checked_sub(record.total_burned) != Some(record.supply)
-                || asset_totals.get(&asset).copied().unwrap_or(Unit::ZERO) != record.supply
+                || totals
+                    .get(asset)
+                    .copied()
+                    .unwrap_or(extension::asset_program::asset::Unit::ZERO)
+                    != record.supply
             {
                 return Err(LedgerError::AssetSupplyMismatch);
             }
@@ -446,7 +447,7 @@ impl LedgerState {
     }
 
     pub(crate) fn application_state_root(&self) -> Result<StateRoot, LedgerError> {
-        if self.assets.is_empty()
+        if self.extensions == extension::script::state::ExtensionState::default()
             && self.utxos.is_empty()
             && self.coin.total_mined.is_zero()
             && self.coin.total_burned.is_zero()
@@ -454,7 +455,7 @@ impl LedgerState {
             return Ok(StateRoot::ZERO);
         }
 
-        let state = canonical_bytes(&(&self.utxos, &self.coin, &self.assets))?;
+        let state = canonical_bytes(&(&self.utxos, &self.coin, &self.extensions))?;
 
         Ok(StateRoot(
             domain(HashDomain::ProtocolState, &state).into_bytes(),
@@ -634,13 +635,16 @@ mod p3e_block_atomicity_tests {
     #[test]
     fn unexpected_coin_supply_delta_is_rejected() {
         let mut state = LedgerState::default();
-        state.utxos.insert_coin(
-            CoinShare::from_bytes([0x44; crypto::HASH16_SIZE]),
-            CoinUtxo {
-                amount: Zeno::from_zeno(109),
-                owner: crypto::Address([0x55; crypto::ADDRESS_SIZE]),
-            },
-        ).unwrap();
+        state
+            .utxos
+            .insert_coin(
+                CoinShare::from_bytes([0x44; crypto::HASH16_SIZE]),
+                CoinUtxo {
+                    amount: Zeno::from_zeno(109),
+                    owner: crypto::Address([0x55; crypto::ADDRESS_SIZE]),
+                },
+            )
+            .unwrap();
         assert!(matches!(
             validate_block_accounting(
                 Zeno::from_zeno(100),
@@ -656,10 +660,8 @@ mod p3e_block_atomicity_tests {
     fn block_with_forged_extra_coin_is_rejected_even_if_supply_record_matches() {
         let ledger = genesis::genesis_ledger().unwrap();
         let before = ledger_bytes(&ledger);
-        let block = empty_height_one_candidate(
-            &ledger,
-            crypto::Address([0x56; crypto::ADDRESS_SIZE]),
-        );
+        let block =
+            empty_height_one_candidate(&ledger, crypto::Address([0x56; crypto::ADDRESS_SIZE]));
         let result = ledger.execute_block_with_checkpoint(&block, |point, state| {
             if point == BlockTransitionPoint::BeforeAccountingCheck {
                 let (id, coin) = state.utxos.coins().next().unwrap();
@@ -1098,5 +1100,357 @@ mod p3e_block_atomicity_tests {
         assert_eq!(ledger.tip_hash(), before_tip);
 
         assert_eq!(ledger.tip_height(), Some(Height(0)));
+    }
+    #[test]
+    fn program_block_snapshot_replay_and_reorg_restore_exact_state() {
+        use crate::consensus::{ProtocolBurn, StateTransitionWeight};
+        use crate::monetary::coin::CoinOutput;
+        use crate::transaction::{
+            AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction, SpendIntent,
+            program_transaction_commitment,
+        };
+        use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+        use extension::{
+            asset_program::{
+                asset::Unit as ExtUnit,
+                opcode::AssetOpcode,
+                state::ExecutionContext,
+                type_::{AssetCall, Register},
+            },
+            script::call::{ProgramCall, ProgramId},
+        };
+        let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([24; 32]));
+        let signer = address_from_public_key(&seed.public_key());
+        let miner = crypto::Address([0x82; crypto::ADDRESS_SIZE]);
+        let mut ledger = genesis::genesis_ledger().unwrap();
+        commit_empty_block(&mut ledger, signer);
+        let parent = ledger.clone();
+        let chain = ledger.chain_context.unwrap();
+        let (input, coin) = ledger.state.utxos.coins().next().unwrap();
+        let amount = coin.amount;
+        let register = Register {
+            name: "ATOMIC".into(),
+            max_supply: ExtUnit::from_units(100),
+            initial_mint: ExtUnit::from_units(10),
+            mint_authority: signer,
+            nonce: 1,
+        };
+        let call = ProgramCall {
+            program: ProgramId::ASSET,
+            opcode: AssetOpcode::Register as u8,
+            payload: borsh::to_vec(&register).unwrap(),
+        };
+        let sign = |output| {
+            let payment =
+                SpendIntent::coin(signer, vec![input], vec![CoinOutput::new(signer, output)])
+                    .unwrap();
+            let commitment =
+                program_transaction_commitment(signer, &call, &payment, chain).unwrap();
+            AuthorizedProgramTransaction {
+                signer,
+                call: call.clone(),
+                payment,
+                authorization: AccountAuthorization {
+                    public_key: seed.public_key(),
+                    signature: seed.sign(commitment.as_bytes()),
+                },
+            }
+        };
+        let dummy = sign(Zeno::ONE);
+        let mut preview = ledger.state.extensions.clone();
+        preview
+            .assets
+            .apply(
+                &AssetCall::Register(register),
+                ExecutionContext {
+                    signer,
+                    commitment: [9; 32],
+                },
+            )
+            .unwrap();
+        let growth = (canonical_bytes(&preview).unwrap().len()
+            - canonical_bytes(&ledger.state.extensions).unwrap().len()) as u64;
+        let size = canonical_bytes(&AuthorizedTransaction::Program(Box::new(dummy)))
+            .unwrap()
+            .len() as u64;
+        let burn = ProtocolBurn::for_transaction(
+            StateTransitionWeight {
+                created_coin_utxos: 1,
+                consumed_coin_utxos: 1,
+                created_state_weight: growth,
+            },
+            size,
+        )
+        .unwrap()
+        .total()
+        .unwrap();
+        let tx = AuthorizedTransaction::Program(Box::new(sign(amount.checked_sub(burn).unwrap())));
+        let candidate = |transactions| {
+            Block::from_protocol_transactions(
+                Height(2),
+                parent.tip_hash().unwrap(),
+                expected_next_difficulty(&parent.chain).unwrap(),
+                Nonce(0),
+                Some(Emission::new(
+                    miner,
+                    expected_emission_for_height(Height(2)),
+                )),
+                transactions,
+            )
+            .unwrap()
+        };
+        let mut block = candidate(vec![tx.clone()]);
+        assert!(ledger.execute_block(&block).is_ok());
+        let bad = candidate(vec![tx.clone(), tx]);
+        assert!(ledger.execute_block(&bad).is_err());
+        assert_eq!(ledger, parent);
+        let executed = ledger.execute_block(&block).unwrap();
+        block.set_state_root(executed.state_root);
+        block.set_block_weight(executed.block_weight);
+        let validated = validate_candidate_for_apply(&block, &ledger.chain).unwrap();
+        ledger.apply_validated_block(validated).unwrap();
+        assert_eq!(ledger.state.extensions.assets.records.len(), 1);
+        assert_eq!(
+            ledger.transaction_protocol_burns(Height(2)).unwrap(),
+            vec![burn]
+        );
+        let bytes = ledger_bytes(&ledger);
+        let restored = Ledger::try_from_slice(&bytes).unwrap();
+        assert_eq!(restored, ledger);
+        let blocks = ledger.chain.blocks().cloned().collect::<Vec<_>>();
+        let snapshot =
+            LedgerSnapshot::try_from_slice(&borsh::to_vec(&ledger.snapshot()).unwrap()).unwrap();
+        let mut recovered = Ledger::from_snapshot(snapshot, &blocks).unwrap();
+        assert_eq!(recovered, ledger);
+        let mut corrupt = recovered.clone();
+        corrupt.journals.get_mut(&Height(2)).unwrap()[1]
+            .spend
+            .as_mut()
+            .unwrap()
+            .created_coin_ids
+            .push(CoinShare::from_bytes([0xfa; crypto::HASH16_SIZE]));
+        let before = ledger_bytes(&corrupt);
+        assert!(corrupt.rollback_tip().is_err());
+        assert_eq!(ledger_bytes(&corrupt), before);
+        recovered.rollback_tip().unwrap();
+        assert_eq!(recovered, parent);
+        let mut replay = parent.clone();
+        replay
+            .apply_validated_block(validate_candidate_for_apply(&block, &parent.chain).unwrap())
+            .unwrap();
+        assert_eq!(replay, ledger);
+        replay.rollback_tip().unwrap();
+        commit_empty_block(&mut replay, miner);
+        assert!(replay.state.extensions.assets.records.is_empty());
+        replay.rollback_tip().unwrap();
+        assert_eq!(replay, parent);
+    }
+
+    #[test]
+    fn active_program_lifecycle_replays_and_rolls_back_every_opcode() {
+        use crate::{
+            consensus::{ProtocolBurn, StateTransitionWeight},
+            monetary::coin::CoinOutput,
+            transaction::{
+                AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction,
+                SpendCharges, program_transaction_commitment,
+            },
+        };
+        use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
+        use extension::{
+            asset_program::{
+                asset::{AssetOutput, Unit as ExtUnit},
+                opcode::AssetOpcode,
+                state::ExecutionContext,
+                type_::{AssetCall, Burn, Mint, Register, Transfer},
+            },
+            script::call::{ProgramCall, ProgramId},
+        };
+        fn commit_call(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) {
+            let signer = address_from_public_key(&seed.public_key());
+            let chain = ledger.chain_context.unwrap();
+            let (opcode, payload) = match &call {
+                AssetCall::Register(v) => (AssetOpcode::Register, borsh::to_vec(v).unwrap()),
+                AssetCall::Mint(v) => (AssetOpcode::Mint, borsh::to_vec(v).unwrap()),
+                AssetCall::Transfer(v) => (AssetOpcode::Transfer, borsh::to_vec(v).unwrap()),
+                AssetCall::Burn(v) => (AssetOpcode::Burn, borsh::to_vec(v).unwrap()),
+            };
+            let mut preview = ledger.state.extensions.clone();
+            preview
+                .assets
+                .apply(
+                    &call,
+                    ExecutionContext {
+                        signer,
+                        commitment: [11; 32],
+                    },
+                )
+                .unwrap();
+            let growth = canonical_bytes(&preview)
+                .unwrap()
+                .len()
+                .saturating_sub(canonical_bytes(&ledger.state.extensions).unwrap().len())
+                as u64;
+            let call = ProgramCall {
+                program: ProgramId::ASSET,
+                opcode: opcode as u8,
+                payload,
+            };
+            let (input, coin) = ledger
+                .state
+                .utxos
+                .coins()
+                .filter(|(_, v)| v.owner == signer)
+                .max_by_key(|(_, v)| v.amount)
+                .unwrap();
+            let amount = coin.amount;
+            let sign = |output| {
+                let payment = SpendIntent::coin_with_charges(
+                    signer,
+                    vec![input],
+                    vec![CoinOutput::new(signer, output)],
+                    SpendCharges::new(Zeno::ONE),
+                )
+                .unwrap();
+                let commitment =
+                    program_transaction_commitment(signer, &call, &payment, chain).unwrap();
+                AuthorizedTransaction::Program(Box::new(AuthorizedProgramTransaction {
+                    signer,
+                    call: call.clone(),
+                    payment,
+                    authorization: AccountAuthorization {
+                        public_key: seed.public_key(),
+                        signature: seed.sign(commitment.as_bytes()),
+                    },
+                }))
+            };
+            let size = canonical_bytes(&sign(Zeno::ONE)).unwrap().len() as u64;
+            let burn = ProtocolBurn::for_transaction(
+                StateTransitionWeight {
+                    created_coin_utxos: 2,
+                    consumed_coin_utxos: 1,
+                    created_state_weight: growth,
+                },
+                size,
+            )
+            .unwrap()
+            .total()
+            .unwrap();
+            let tx = sign(
+                amount
+                    .checked_sub(burn)
+                    .unwrap()
+                    .checked_sub(Zeno::ONE)
+                    .unwrap(),
+            );
+            let height = Height(ledger.tip_height().unwrap().0 + 1);
+            let mut block = Block::from_protocol_transactions(
+                height,
+                ledger.tip_hash().unwrap(),
+                expected_next_difficulty(&ledger.chain).unwrap(),
+                Nonce(0),
+                Some(Emission::new(signer, expected_emission_for_height(height))),
+                vec![tx],
+            )
+            .unwrap();
+            let (root, weight) = ledger.preview_block_commitments(&block).unwrap();
+            block.set_state_root(root);
+            block.set_block_weight(weight);
+            ledger
+                .apply_validated_block(validate_candidate_for_apply(&block, &ledger.chain).unwrap())
+                .unwrap();
+            let blocks = ledger.chain.blocks().cloned().collect::<Vec<_>>();
+            let snapshot =
+                LedgerSnapshot::try_from_slice(&borsh::to_vec(&ledger.snapshot()).unwrap())
+                    .unwrap();
+            *ledger = Ledger::from_snapshot(snapshot, &blocks).unwrap();
+        }
+        let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([25; 32]));
+        let signer = address_from_public_key(&seed.public_key());
+        let mut ledger = genesis::genesis_ledger().unwrap();
+        commit_empty_block(&mut ledger, signer);
+        let mut checkpoints = vec![ledger.clone()];
+        commit_call(
+            &mut ledger,
+            &seed,
+            AssetCall::Register(Register {
+                name: "LIFECYCLE".into(),
+                max_supply: ExtUnit::from_units(100),
+                initial_mint: ExtUnit::from_units(40),
+                mint_authority: signer,
+                nonce: 1,
+            }),
+        );
+        checkpoints.push(ledger.clone());
+        let asset = *ledger
+            .state
+            .extensions
+            .assets
+            .records
+            .keys()
+            .next()
+            .unwrap();
+        commit_call(
+            &mut ledger,
+            &seed,
+            AssetCall::Mint(Mint {
+                asset,
+                nonce: 1,
+                recipient: signer,
+                amount: ExtUnit::from_units(20),
+            }),
+        );
+        checkpoints.push(ledger.clone());
+        let inputs = ledger
+            .state
+            .extensions
+            .assets
+            .shares
+            .keys()
+            .copied()
+            .collect();
+        commit_call(
+            &mut ledger,
+            &seed,
+            AssetCall::Transfer(Transfer {
+                asset,
+                inputs,
+                outputs: vec![AssetOutput::new(signer, ExtUnit::from_units(60))],
+            }),
+        );
+        checkpoints.push(ledger.clone());
+        let inputs = ledger
+            .state
+            .extensions
+            .assets
+            .shares
+            .keys()
+            .copied()
+            .collect();
+        commit_call(
+            &mut ledger,
+            &seed,
+            AssetCall::Burn(Burn {
+                asset,
+                inputs,
+                amount: ExtUnit::from_units(10),
+                output: ExtUnit::from_units(50),
+            }),
+        );
+        assert_eq!(
+            ledger.state.extensions.assets.records[&asset].supply,
+            ExtUnit::from_units(50)
+        );
+        let mut replay = genesis::genesis_ledger().unwrap();
+        for block in ledger.chain.blocks().skip(1) {
+            replay
+                .apply_validated_block(validate_candidate_for_apply(block, &replay.chain).unwrap())
+                .unwrap();
+        }
+        assert_eq!(replay, ledger);
+        for checkpoint in checkpoints.into_iter().rev() {
+            replay.rollback_tip().unwrap();
+            assert_eq!(replay, checkpoint);
+        }
     }
 }

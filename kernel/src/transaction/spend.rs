@@ -10,13 +10,7 @@ use crypto::{Address, HASH_SIZE, HashDomain, canonical_bytes, domain};
 use crate::common::ChainContext;
 
 use crate::{
-    monetary::{
-        asset::{
-            AssetContract, AssetOutput, Share, ensure_nonzero_asset_amount,
-            ensure_unique_asset_inputs,
-        },
-        coin::{CoinOutput, CoinShare, Zeno},
-    },
+    monetary::coin::{CoinOutput, CoinShare, Zeno},
     transaction::{IntentError, MAX_TRANSACTION_ITEMS, deserialize_bounded_vec},
 };
 
@@ -46,19 +40,12 @@ impl SpendIntentCommitment {
 
 /// An account-authorized transfer.
 ///
-/// Register, mint, and burn remain monetary asset operations.
+/// Native XPQ spends are separate from extension Program calls.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub enum Spend {
     Coin {
         inputs: Vec<CoinShare>,
         outputs: Vec<CoinOutput>,
-    },
-    Combined {
-        coin_inputs: Vec<CoinShare>,
-        coin_outputs: Vec<CoinOutput>,
-        asset: AssetContract,
-        asset_inputs: Vec<Share>,
-        asset_outputs: Vec<AssetOutput>,
     },
 }
 
@@ -68,13 +55,6 @@ impl BorshDeserialize for Spend {
             0 => Ok(Self::Coin {
                 inputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
                 outputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
-            }),
-            1 => Ok(Self::Combined {
-                coin_inputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
-                coin_outputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
-                asset: AssetContract::deserialize_reader(reader)?,
-                asset_inputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
-                asset_outputs: deserialize_bounded_vec(reader, MAX_TRANSACTION_ITEMS)?,
             }),
             _ => Err(Error::new(ErrorKind::InvalidData, "invalid spend variant")),
         }
@@ -124,49 +104,6 @@ impl SpendIntent {
         Ok(intent)
     }
 
-    pub fn combined(
-        signer: Address,
-        coin_inputs: Vec<CoinShare>,
-        coin_outputs: Vec<CoinOutput>,
-        asset: AssetContract,
-        asset_inputs: Vec<Share>,
-        asset_outputs: Vec<AssetOutput>,
-    ) -> Result<Self, IntentError> {
-        Self::combined_with_charges(
-            signer,
-            coin_inputs,
-            coin_outputs,
-            asset,
-            asset_inputs,
-            asset_outputs,
-            SpendCharges::default(),
-        )
-    }
-
-    pub fn combined_with_charges(
-        signer: Address,
-        coin_inputs: Vec<CoinShare>,
-        coin_outputs: Vec<CoinOutput>,
-        asset: AssetContract,
-        asset_inputs: Vec<Share>,
-        asset_outputs: Vec<AssetOutput>,
-        charges: SpendCharges,
-    ) -> Result<Self, IntentError> {
-        let intent = Self {
-            signer,
-            spend: Spend::Combined {
-                coin_inputs,
-                coin_outputs,
-                asset,
-                asset_inputs,
-                asset_outputs,
-            },
-            charges,
-        };
-        intent.validate()?;
-        Ok(intent)
-    }
-
     pub fn with_charges(mut self, charges: SpendCharges) -> Result<Self, IntentError> {
         self.charges = charges;
         self.validate()?;
@@ -174,70 +111,24 @@ impl SpendIntent {
     }
 
     pub fn validate(&self) -> Result<(), IntentError> {
-        let within_limit = |length: usize| length <= MAX_TRANSACTION_ITEMS;
-        match &self.spend {
-            Spend::Coin { inputs, outputs } => {
-                if !within_limit(inputs.len()) || !within_limit(outputs.len()) {
-                    return Err(IntentError::TooManyItems);
-                }
-                if inputs.is_empty() {
-                    return Err(IntentError::EmptyInputs);
-                }
-                if outputs.is_empty() && self.charges.miner_fee.is_zero() {
-                    return Err(IntentError::EmptyOutputs);
-                }
-
-                let mut unique = BTreeSet::new();
-                if inputs.iter().any(|id| !unique.insert(*id)) {
-                    return Err(IntentError::DuplicateInput);
-                }
-
-                if outputs.iter().any(|output| output.amount == Zeno::ZERO) {
-                    return Err(IntentError::ZeroAmount);
-                }
-
-                Ok(())
-            }
-            Spend::Combined {
-                coin_inputs,
-                coin_outputs,
-                asset_inputs,
-                asset_outputs,
-                ..
-            } => {
-                if !within_limit(coin_inputs.len())
-                    || !within_limit(coin_outputs.len())
-                    || !within_limit(asset_inputs.len())
-                    || !within_limit(asset_outputs.len())
-                {
-                    return Err(IntentError::TooManyItems);
-                }
-                if coin_inputs.is_empty()
-                    || (coin_outputs.is_empty() && self.charges.miner_fee.is_zero())
-                    || asset_inputs.is_empty()
-                    || asset_outputs.is_empty()
-                {
-                    return Err(IntentError::EmptyInputs);
-                }
-                let mut unique = BTreeSet::new();
-                if coin_inputs.iter().any(|id| !unique.insert(*id)) {
-                    return Err(IntentError::DuplicateInput);
-                }
-                if coin_outputs
-                    .iter()
-                    .any(|output| output.amount == Zeno::ZERO)
-                {
-                    return Err(IntentError::ZeroAmount);
-                }
-                ensure_unique_asset_inputs(asset_inputs)
-                    .map_err(|_| IntentError::InvalidAssetCall)?;
-                for output in asset_outputs {
-                    ensure_nonzero_asset_amount(output.amount)
-                        .map_err(|_| IntentError::InvalidAssetCall)?;
-                }
-                Ok(())
-            }
+        let Spend::Coin { inputs, outputs } = &self.spend;
+        if inputs.len() > MAX_TRANSACTION_ITEMS || outputs.len() > MAX_TRANSACTION_ITEMS {
+            return Err(IntentError::TooManyItems);
         }
+        if inputs.is_empty() {
+            return Err(IntentError::EmptyInputs);
+        }
+        if outputs.is_empty() && self.charges.miner_fee.is_zero() {
+            return Err(IntentError::EmptyOutputs);
+        }
+        let mut unique = BTreeSet::new();
+        if inputs.iter().any(|id| !unique.insert(*id)) {
+            return Err(IntentError::DuplicateInput);
+        }
+        if outputs.iter().any(|output| output.amount.is_zero()) {
+            return Err(IntentError::ZeroAmount);
+        }
+        Ok(())
     }
 
     /// Canonical bytes of the unsigned SpendIntent semantics.
@@ -263,23 +154,6 @@ impl SpendIntent {
     pub fn coin_parts(&self) -> Option<(&[CoinShare], &[CoinOutput])> {
         match &self.spend {
             Spend::Coin { inputs, outputs } => Some((inputs, outputs)),
-            Spend::Combined {
-                coin_inputs,
-                coin_outputs,
-                ..
-            } => Some((coin_inputs, coin_outputs)),
-        }
-    }
-
-    pub fn asset_parts(&self) -> Option<(AssetContract, &[Share], &[AssetOutput])> {
-        match &self.spend {
-            Spend::Coin { .. } => None,
-            Spend::Combined {
-                asset,
-                asset_inputs,
-                asset_outputs,
-                ..
-            } => Some((*asset, asset_inputs, asset_outputs)),
         }
     }
 }
@@ -287,10 +161,7 @@ impl SpendIntent {
 #[cfg(test)]
 mod conservation_tests {
     use super::*;
-    use crate::monetary::{
-        asset::{AssetContract, AssetOutput, Share, Unit},
-        coin::{CoinOutput, CoinShare, Zeno},
-    };
+    use crate::monetary::coin::{CoinOutput, CoinShare, Zeno};
     use crypto::HASH16_SIZE;
 
     fn address(byte: u8) -> Address {
@@ -311,23 +182,6 @@ mod conservation_tests {
     }
 
     #[test]
-    fn duplicate_asset_inputs_are_rejected_structurally() {
-        let input = Share::from_bytes([0x22; HASH16_SIZE]);
-        let asset = AssetContract::from_bytes([0x33; HASH_SIZE]);
-
-        let result = SpendIntent::combined(
-            address(1),
-            vec![CoinShare::from_bytes([0x12; HASH16_SIZE])],
-            vec![CoinOutput::new(address(1), Zeno::ONE)],
-            asset,
-            vec![input, input],
-            vec![AssetOutput::new(address(2), Unit::from_units(1))],
-        );
-
-        assert!(matches!(result, Err(IntentError::InvalidAssetCall)));
-    }
-
-    #[test]
     fn zero_value_coin_output_is_rejected_structurally() {
         let input = CoinShare::from_bytes([0x44; HASH16_SIZE]);
 
@@ -339,21 +193,14 @@ mod conservation_tests {
 
         assert!(matches!(result, Err(IntentError::ZeroAmount)));
     }
+}
+
+#[cfg(test)]
+mod removed_legacy_tests {
+    use super::*;
 
     #[test]
-    fn zero_value_asset_output_is_rejected_structurally() {
-        let input = Share::from_bytes([0x55; HASH16_SIZE]);
-        let asset = AssetContract::from_bytes([0x66; HASH_SIZE]);
-
-        let result = SpendIntent::combined(
-            address(1),
-            vec![CoinShare::from_bytes([0x56; HASH16_SIZE])],
-            vec![CoinOutput::new(address(1), Zeno::ONE)],
-            asset,
-            vec![input],
-            vec![AssetOutput::new(address(2), Unit::ZERO)],
-        );
-
-        assert!(matches!(result, Err(IntentError::InvalidAssetCall)));
+    fn removed_combined_spend_tag_is_rejected() {
+        assert!(Spend::try_from_slice(&[1]).is_err());
     }
 }

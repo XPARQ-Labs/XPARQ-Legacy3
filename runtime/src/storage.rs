@@ -14,8 +14,8 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 
 const DATABASE_FILE: &str = "xparq.redb";
 
-// Reset-chain generation 3 stores owners inside UTXOs and unified asset records.
-const SCHEMA_VERSION: u32 = 3;
+// Reset-chain schema stores coin-only UTXOs and Program extension state/journals.
+const SCHEMA_VERSION: u32 = 6;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");
@@ -34,6 +34,7 @@ const INDEX_TIP_HASH_KEY: &str = "canonical_index_tip_hash";
 const ADDRESS_ACTIVITY_INDEX: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("address_activity_index");
 const COIN_ORIGIN_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("coin_origin_index");
+const ADDRESS_PROGRAM_INDEX_VERSION_KEY: &str = "address_program_index_version";
 const COIN_ORIGIN_INDEX_VERSION_KEY: &str = "coin_origin_index_version";
 
 /// Rebuildable canonical-chain metadata, separate from consensus UTXO state.
@@ -263,7 +264,13 @@ pub fn canonical_index_tip(directory: &Path) -> Result<Option<(u64, [u8; 32])>, 
         .map_err(|error| format!("read coin origin index version: {error}"))?
         .map(|value| value.value().to_vec());
 
-    if origin_version.as_deref() != Some(&[1_u8][..]) {
+    let program_version = metadata
+        .get(ADDRESS_PROGRAM_INDEX_VERSION_KEY)
+        .map_err(|e| format!("read program address index version: {e}"))?
+        .map(|v| v.value().to_vec());
+    if program_version.as_deref() != Some(&[1_u8][..])
+        || origin_version.as_deref() != Some(&[1_u8][..])
+    {
         return Ok(None);
     }
 
@@ -397,7 +404,6 @@ fn block_coin_origins(
     for transaction in block.transactions() {
         let spend = match transaction {
             AuthorizedTransaction::Spend(tx) => &tx.intent,
-            AuthorizedTransaction::Asset(tx) => &tx.payment,
             AuthorizedTransaction::Program(tx) => &tx.payment,
         };
         let (_, outputs) = spend
@@ -707,6 +713,9 @@ pub fn rebuild_canonical_indexes(
         metadata
             .insert(INDEX_TIP_HASH_KEY, tip.hash.as_slice())
             .map_err(|error| format!("write canonical index tip hash: {error}"))?;
+        metadata
+            .insert(ADDRESS_PROGRAM_INDEX_VERSION_KEY, &[1_u8][..])
+            .map_err(|e| format!("write program address index version: {e}"))?;
         metadata
             .insert(COIN_ORIGIN_INDEX_VERSION_KEY, &[1_u8][..])
             .map_err(|error| format!("write coin origin index version: {error}"))?;

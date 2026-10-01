@@ -5,7 +5,8 @@
 The project is organized around a small set of components:
 
 - `crypto` — cryptographic primitives and post-quantum signature support
-- `kernel` — consensus, ledger, transactions, native coin, and asset rules
+- `kernel` — consensus, ledger, transactions, native coin, and Program execution integration
+- `extension` — Program dispatch and asset state, authorization, and execution
 - `runtime` — node, P2P networking, synchronization, storage, mining, and RPC
 - `wallet` — local wallet and CLI
 - `docs` — protocol and RPC documentation
@@ -336,7 +337,7 @@ XPARQ Wallet
 7. Transfer
 8. Consolidate UTXOs
 9. Explorer
-10. Assets
+10. Program Assets
 11. Exit
 ```
 
@@ -589,16 +590,15 @@ The canonical block log remains required for startup and reorganization.
 
 ## Useful development commands
 
-### Combined coin and asset spend
+### Coin spends and Program assets
 
-`wallet asset-transfer` now places the asset transfer and its XPQ fee payment in
-one signed spend. The same wallet must own both sets of inputs. To transfer XPQ
-to a recipient in that transaction as well, provide both `--coin-to ADDRESS`
-and `--coin-amount XPQ`. Asset registration, mint, and burn use one signature
-for the asset operation and its XPQ payment. The same wallet owns the XPQ inputs
-and signs the asset call.
-The old two-authorization asset-transfer variant has been removed; only the
-combined spend format is accepted after the chain reset.
+The kernel stores native XPQ UTXOs. Assets live in the extension Program state
+and use the wallet `program-*` commands. One Program signature binds the asset
+operation and its XPQ payment. Legacy asset transactions, combined spends and
+`asset-*` commands have been removed.
+
+See [ProgramCall usage](docs/PROGRAM_CALL_USAGE.md) for registration, mint,
+transfer, burn and consolidation instructions.
 
 All XPQ spend intents now carry `SpendCharges { miner_fee }`. The miner fee is
 credited to the block miner as a separate UTXO; it is no longer encoded as a
@@ -609,8 +609,8 @@ planned chain reset.
 Coin outputs encode the recipient address directly; the obsolete block-miner
 recipient tag is no longer part of a spend output.
 
-This transaction format changes consensus. Nodes that have not been upgraded
-will reject combined spends; deploy it with a coordinated network upgrade.
+The reset baseline uses chain spec version 1 and storage schema 6. Start with
+fresh compatible storage; old assets and transactions are not migrated.
 
 Check the complete workspace:
 
@@ -648,6 +648,7 @@ cargo clippy --workspace --all-targets
 XPARQ/
 ├── crypto/       Cryptographic primitives
 ├── kernel/       Consensus and ledger rules
+├── extension/    Program dispatch and asset state/execution
 ├── runtime/      Node runtime
 ├── wallet/       Wallet and CLI
 ├── docs/         Protocol and RPC documentation

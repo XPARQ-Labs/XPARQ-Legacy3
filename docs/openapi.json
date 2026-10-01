@@ -11,8 +11,9 @@
     "/balance/{address}": { "get": { "summary": "Get account balances", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Balance" } } } },
     "/account/{address}": { "get": { "summary": "Get account UTXOs", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Account state" } } } },
     "/coin-origin/{share}": { "get": { "summary": "Get canonical creation transaction and block height for a coin share", "parameters": [{ "name": "share", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{32}$" } }], "responses": { "200": { "description": "Coin origin or null if absent" } } } },
-    "/asset/{asset}": { "get": { "summary": "Get asset metadata", "parameters": [{ "$ref": "#/components/parameters/AssetId" }], "responses": { "200": { "description": "Asset metadata" } } } },
-    "/asset/{asset}/balance/{address}": { "get": { "summary": "Get address-owned asset balance", "parameters": [{ "$ref": "#/components/parameters/AssetId" }, { "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Asset balance" } } } },
+    "/program/quote": { "post": { "summary": "Quote canonical extension state growth for a signed Program transaction without submitting it", "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }, "responses": { "200": { "description": "created_state_weight in bytes and canonical tip_hash; payment burn is not checked during quote" } } } },
+    "/program/asset/{asset}": { "get": { "summary": "Get extension asset metadata, supply and mint nonce", "parameters": [{ "$ref": "#/components/parameters/AssetId" }], "responses": { "200": { "description": "Extension asset metadata" } } } },
+    "/program/asset/{asset}/balance/{address}": { "get": { "summary": "Get extension asset balance and shares", "parameters": [{ "$ref": "#/components/parameters/AssetId" }, { "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Raw unit amount strings and owned shares" } } } },
     "/blocks/latest": { "get": { "summary": "Get latest blocks", "responses": { "200": { "description": "Blocks" } } } },
     "/block/{height}": { "get": { "summary": "Get block by height", "parameters": [{ "name": "height", "in": "path", "required": true, "schema": { "type": "integer", "format": "uint64" } }], "responses": { "200": { "description": "Block" } } } },
     "/explorer/address/{address}": { "get": { "summary": "Get address activity", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Address activity" } } } },
@@ -21,7 +22,7 @@
   "components": {
     "parameters": {
       "Address": { "name": "address", "in": "path", "required": true, "schema": { "type": "string" } },
-      "AssetId": { "name": "asset_id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/AssetId" } }
+      "AssetId": { "name": "asset", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/AssetId" } }
     },
     "schemas": {
       "AssetId": { "type": "string", "pattern": "^[0-9a-f]{64}$" }

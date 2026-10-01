@@ -100,6 +100,35 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         let hash = insert_mempool_transaction(database, transaction, false)?;
         return write_http_response(stream, 200, &serde_json::json!({"hash": hex::encode(hash)}));
     }
+    if method == "POST" && route == "/program/quote" {
+        if request.body.len() > kernel::transaction::MAX_TRANSACTION_SIZE {
+            return Err("quote transaction exceeds consensus size limit".into());
+        }
+        let tx: Transaction = canonical_decode(&request.body)
+            .map_err(|e| format!("invalid quote transaction: {e}"))?;
+        let AuthorizedTransaction::Program(tx) = tx else {
+            return Err("quote requires a Program transaction".into());
+        };
+        let (ledger, _, _, _) = load_or_initialize_header_snapshot(database)?;
+        let chain = kernel::genesis::chain_context().map_err(|e| e.to_string())?;
+        let height = ledger.tip_height().map_or(0, |h| h.0.saturating_add(1));
+        if !tx
+            .verify_authorizations(chain, height)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("invalid quote authorization".into());
+        }
+        let weight =
+            kernel::program::program_created_state_weight(&tx, chain, &ledger.state().extensions)
+                .map_err(|e| e.to_string())?;
+        return write_http_response(
+            stream,
+            200,
+            &serde_json::json!({
+                "created_state_weight":weight, "tip_hash": ledger.tip_hash().map(|h|hex::encode(h.0)),
+            }),
+        );
+    }
     if method != "GET" {
         return Err("unsupported RPC method".into());
     }
@@ -153,7 +182,8 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 })),
             })
         }
-        route if route.starts_with("/asset/") => asset_response(&ledger, route)?,
+        route if route.starts_with("/program/asset/") => program_asset_response(&ledger, route)?,
+
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
             if address.is_empty() || address.contains(['/', '?', '#']) {

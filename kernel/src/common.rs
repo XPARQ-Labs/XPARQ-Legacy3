@@ -3,10 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crypto::{Address, HASH_SIZE};
 
-use crate::monetary::{
-    asset::{AssetContract, Unit},
-    coin::Zeno,
-};
+use crate::monetary::coin::Zeno;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub struct ChainContext {
@@ -69,29 +66,18 @@ impl Recipient {
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Value {
     Coin(Zeno),
-
-    Asset { asset: AssetContract, amount: Unit },
 }
 
 impl Value {
     pub const fn coin(self) -> Option<Zeno> {
         match self {
             Self::Coin(amount) => Some(amount),
-            Self::Asset { .. } => None,
-        }
-    }
-
-    pub const fn asset(self) -> Option<(AssetContract, Unit)> {
-        match self {
-            Self::Coin(_) => None,
-            Self::Asset { asset, amount } => Some((asset, amount)),
         }
     }
 
     pub const fn is_zero(self) -> bool {
         match self {
             Self::Coin(amount) => amount.is_zero(),
-            Self::Asset { amount, .. } => amount.is_zero(),
         }
     }
 }

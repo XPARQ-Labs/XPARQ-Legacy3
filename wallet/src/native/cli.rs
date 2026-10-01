@@ -14,7 +14,7 @@ pub(super) fn interactive_menu() -> Result<(), String> {
         println!("7. Transfer");
         println!("8. Consolidate UTXOs");
         println!("9. Explorer");
-        println!("10. Assets");
+        println!("10. Program Assets");
         println!("11. Exit");
 
         match prompt("Select")?.as_str() {
@@ -48,86 +48,49 @@ pub(super) fn interactive_menu() -> Result<(), String> {
             "7" => interactive_spend()?,
             "8" => interactive_wallet_query(consolidate_coin_utxos)?,
             "9" => interactive_block_explorer()?,
-            "10" => interactive_assets()?,
+            "10" => interactive_program_assets()?,
             "11" | "exit" | "quit" => return Ok(()),
             choice => println!("Unknown selection `{choice}`"),
         }
     }
 }
 
-fn interactive_assets() -> Result<(), String> {
-    println!();
-    println!("XPARQ Assets");
-    println!("1. Create");
-    println!("2. Mint");
-    println!("3. Transfer");
-    println!("4. Burn");
-    println!("5. Info");
-    println!("6. Balance");
-    println!("7. Consolidate Shares");
-    println!("8. Back");
-
-    match prompt("Select")?.as_str() {
-        "1" => {
-            let wallet_rpc_args = interactive_asset_wallet_rpc()?;
-            let name = prompt("Asset Name")?;
-            let max_supply = prompt("Maximum Supply")?;
-            let mint_amount = prompt("Initial Mint")?;
-
-            let mut register_args = wallet_rpc_args.clone();
-            register_args.extend(["--name".into(), name]);
-            register_args.extend(["--max-supply".into(), max_supply]);
-            register_args.extend(["--initial-mint".into(), mint_amount]);
-            asset_register(&register_args)
-        }
-        "2" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset Contract")?]);
-            args.extend(interactive_asset_recipient()?);
-            args.extend(["--amount".into(), prompt("Asset amount")?]);
-            asset_mint(&args)
-        }
-        "3" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset Contract")?]);
-            args.extend(interactive_asset_recipient()?);
-            args.extend(["--amount".into(), prompt("Asset amount")?]);
-            asset_transfer(&args)
-        }
-        "4" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset Contract")?]);
-            args.extend(["--amount".into(), prompt("Asset amount")?]);
-            asset_burn(&args)
-        }
-        "5" => {
-            let args = vec![
-                "--asset".into(),
-                prompt("Asset Contract")?,
-                "--rpc".into(),
-                prompt_default("RPC", DEFAULT_RPC_ADDR)?,
-            ];
-            asset_info(&args)
-        }
-        "6" => {
-            let args = vec![
-                "--asset".into(),
-                prompt("Asset ID")?,
-                "--wallet".into(),
-                prompt_default("Wallet file", DEFAULT_WALLET_PATH)?,
-                "--rpc".into(),
-                prompt_default("RPC", DEFAULT_RPC_ADDR)?,
-            ];
-            asset_balance(&args)
-        }
-        "7" => {
-            let mut args = interactive_asset_wallet_rpc()?;
-            args.extend(["--asset".into(), prompt("Asset Contract")?]);
-            consolidate_asset_shares(&args)
-        }
-        "8" | "back" => Ok(()),
-        choice => Err(format!("unknown asset selection `{choice}`")),
+fn interactive_program_assets() -> Result<(), String> {
+    println!(
+        "Program Assets: 1 Create, 2 Mint, 3 Transfer, 4 Burn, 5 Info, 6 Balance, 7 Consolidate, 8 Back"
+    );
+    let choice = prompt("Select")?;
+    let command = match choice.as_str() {
+        "1" => "program-register",
+        "2" => "program-mint",
+        "3" => "program-transfer",
+        "4" => "program-burn",
+        "5" => "program-info",
+        "6" => "program-balance",
+        "7" => "program-consolidate",
+        "8" | "back" => return Ok(()),
+        _ => return Err("unknown Program selection".into()),
+    };
+    let mut args = interactive_asset_wallet_rpc()?;
+    if choice == "1" {
+        args.extend([
+            "--name".into(),
+            prompt("Asset Name")?,
+            "--max-supply".into(),
+            prompt("Maximum Supply")?,
+            "--initial-mint".into(),
+            prompt("Initial Mint")?,
+        ]);
+    } else {
+        args.extend(["--asset".into(), prompt("Program Asset Contract")?]);
     }
+    if choice == "2" || choice == "3" {
+        args.extend(interactive_asset_recipient()?);
+    }
+    if matches!(choice.as_str(), "2" | "3" | "4") {
+        args.extend(["--amount".into(), prompt("Amount")?]);
+    }
+    super::program::command(command, &args)
 }
 
 fn interactive_asset_recipient() -> Result<[String; 2], String> {
