@@ -699,6 +699,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "extension"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "crypto",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1342,6 +1350,7 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "crypto",
+ "extension",
  "serde",
  "static_assertions 1.1.0",
 ]

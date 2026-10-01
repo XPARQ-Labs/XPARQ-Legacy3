@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["kernel", "crypto", "runtime", "wallet"]
+members = ["kernel", "crypto", "runtime", "wallet", "extension"]
 exclude = [
     "depend",
 ]

@@ -14,6 +14,7 @@ use crate::{
         WBDA_HIGH_UTILIZATION_PPM, WBDA_LOW_UTILIZATION_PPM, WBDA_TARGET_BLOCK_WEIGHT, WBDA_WINDOW,
     },
     ledger::{Ledger, LedgerError},
+    monetary::coin::CoinContract,
     transaction::{MAX_TRANSACTION_ITEMS, MAX_TRANSACTION_SIZE},
 };
 
@@ -66,7 +67,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 
 /// Incremented whenever a consensus-critical field in [`ChainSpecIdentity`]
 /// changes.
-pub const CHAIN_SPEC_VERSION: u32 = 1;
+pub const CHAIN_SPEC_VERSION: u32 = 2;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -113,6 +114,7 @@ struct ChainSpecIdentity<'a> {
     hash_size: u32,
 
     // Native protocol identity
+    native_coin_contract: [u8; HASH_SIZE],
     native_asset_program: &'a str,
     transaction_format: &'a str,
 }
@@ -164,6 +166,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         hash_size: HASH_SIZE as u32,
 
         // Native protocol identity
+        native_coin_contract: CoinContract::derive().into_bytes(),
         native_asset_program: "xparq-native-asset-record-nonce-v1",
         transaction_format: "direct-authorized-v2",
     };
@@ -177,12 +180,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 mod phase3_chain_spec_tests {
     #[test]
     fn bounded_work_rules_have_frozen_mainnet_chain_spec_identity() {
-        assert_eq!(super::CHAIN_SPEC_VERSION, 3);
+        assert_eq!(super::CHAIN_SPEC_VERSION, 2);
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                144, 110, 3, 100, 135, 55, 114, 199, 137, 213, 171, 190, 192, 239, 253, 238, 83,
-                94, 128, 32, 6, 176, 42, 116, 230, 235, 250, 179, 164, 76, 126, 0,
+                5, 133, 226, 37, 189, 212, 180, 192, 65, 201, 197, 198, 84, 65, 2, 170, 226,
+                121, 80, 218, 199, 76, 86, 51, 101, 16, 3, 180, 12, 235, 149, 217,
             ]
         );
     }

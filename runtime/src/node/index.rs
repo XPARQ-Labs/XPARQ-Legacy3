@@ -34,6 +34,15 @@ pub(super) fn canonical_block_height(
     Ok(crate::storage::read_block_height_by_hash(path, hash)?.map(Height))
 }
 
+pub(super) fn coin_origin(
+    path: &Path,
+    ledger: &Ledger,
+    share: kernel::monetary::coin::CoinShare,
+) -> Result<Option<crate::storage::CoinOrigin>, String> {
+    ensure_persistent_indexes(path, ledger)?;
+    crate::storage::read_coin_origin(path, share)
+}
+
 fn transaction_addresses(
     transaction: &Transaction,
     miner: Address,
@@ -52,6 +61,10 @@ fn transaction_addresses(
         }
 
         AuthorizedTransaction::Asset(transaction) => (
+            transaction.payment.signer,
+            explorer::coin_outputs_with_charges(&transaction.payment, miner),
+        ),
+        AuthorizedTransaction::Program(transaction) => (
             transaction.payment.signer,
             explorer::coin_outputs_with_charges(&transaction.payment, miner),
         ),
@@ -119,6 +132,9 @@ fn ensure_persistent_indexes(path: &Path, ledger: &Ledger) -> Result<(), String>
                 height: block.height().0,
 
                 hash: block.hash().map_err(|error| error.to_string())?.0,
+
+                bytes: kernel::blockchain::block_bytes(block)
+                    .map_err(|error| error.to_string())?,
 
                 transactions: block
                     .transactions()

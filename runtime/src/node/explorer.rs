@@ -312,6 +312,11 @@ pub(super) fn address_transaction_activity(
             coin_outputs_with_charges(&tx.payment, miner),
             coin_burn(&tx.payment),
         ),
+        AuthorizedTransaction::Program(tx) => (
+            Some(tx.payment.signer),
+            coin_outputs_with_charges(&tx.payment, miner),
+            coin_burn(&tx.payment),
+        ),
     };
     let received = checked_output_sum(
         outputs
@@ -413,6 +418,14 @@ pub(super) fn transaction_response(
     match transaction {
         AuthorizedTransaction::Spend(spend) => spend_transaction_response(spend, protocol_burn),
         AuthorizedTransaction::Asset(asset) => asset_transaction_response(asset, protocol_burn),
+        AuthorizedTransaction::Program(program) => serde_json::json!({
+            "type": "program",
+            "program_id": program.call.program.0,
+            "opcode": program.call.opcode,
+            "payload": hex::encode(&program.call.payload),
+            "signer": kernel::crypto::address_to_string(&program.signer),
+            "protocol_burn": protocol_burn.as_zeno(),
+        }),
     }
 }
 
@@ -559,6 +572,7 @@ pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
             kernel::transaction::Spend::Combined { .. } => "asset-transfer",
         },
         AuthorizedTransaction::Asset(_) => "asset",
+        AuthorizedTransaction::Program(_) => "program",
     }
 }
 

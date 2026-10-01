@@ -5,6 +5,7 @@ pub mod error;
 pub mod genesis;
 pub mod ledger;
 pub mod monetary;
+pub mod program;
 pub mod transaction;
 
 pub mod block {

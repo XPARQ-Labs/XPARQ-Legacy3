@@ -302,6 +302,7 @@ fn validate_authorized_transaction(
                 payment,
             }))
         }
+        AuthorizedTransaction::Program(_) => Err(TransactionConsensusError::ProgramNotActive),
     }
 }
 
@@ -466,6 +467,7 @@ fn ensure_unique_coin_ids(
 pub enum TransactionConsensusError {
     Encoding,
     TransactionTooLarge,
+    ProgramNotActive,
     Intent(IntentError),
     InvalidAuthorization,
     SignatureSchemeInactive,
@@ -485,6 +487,7 @@ impl fmt::Display for TransactionConsensusError {
             Self::TransactionTooLarge => {
                 formatter.write_str("transaction exceeds consensus size limit")
             }
+            Self::ProgramNotActive => formatter.write_str("program transactions are not active"),
             Self::Intent(error) => write!(formatter, "invalid transaction intent: {error}"),
             Self::InvalidAuthorization => {
                 formatter.write_str("transaction authorization is invalid")

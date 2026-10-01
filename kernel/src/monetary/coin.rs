@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::{
-    Address, HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, domain, domain16,
+    Address, HASH_SIZE, HASH16_SIZE, Hash, Hash16, HashDomain, HashParseError, domain16,
 };
 use std::{fmt, str::FromStr};
 
@@ -63,8 +63,8 @@ pub struct CoinContract(Hash);
 impl CoinContract {
     pub const SIZE: usize = HASH_SIZE;
 
-    pub fn derive() -> Self {
-        Self(domain(HashDomain::XPQState, b"XPARQ_NATIVE_COIN_V1"))
+    pub const fn derive() -> Self {
+        Self(Hash::from_bytes([0; HASH_SIZE]))
     }
 
     pub const fn from_hash(hash: Hash) -> Self {
@@ -228,7 +228,9 @@ mod tests {
         let contract = CoinContract::derive();
 
         assert_eq!(contract.as_bytes().len(), HASH_SIZE);
+        assert_eq!(contract.into_bytes(), [0; HASH_SIZE]);
         assert_eq!(contract.to_string().len(), HASH_SIZE * 2);
+        assert_eq!(contract.to_string(), "0".repeat(HASH_SIZE * 2));
     }
 
     #[test]

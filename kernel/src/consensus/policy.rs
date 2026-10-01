@@ -238,6 +238,21 @@ pub fn validate_emission(block: &Block) -> Result<ValidatedEmission, EmissionErr
     authorize_emission(block)
 }
 
+/// Derive the emission UTXO origin from block body fields, independent of
+/// subsidy validation. Canonical block admission validates the subsidy.
+pub fn emission_origin(block: &Block) -> Result<Hash, EmissionError> {
+    let emission = block.emission().ok_or(EmissionError::MissingEmission)?;
+    let bytes = canonical_bytes(&(
+        b"emission",
+        block.previous_hash(),
+        block.height(),
+        emission.to,
+        emission.subsidy,
+    ))
+    .map_err(|_| EmissionError::Serialization)?;
+    Ok(domain(HashDomain::Emission, &bytes))
+}
+
 pub(crate) fn authorize_emission(block: &Block) -> Result<ValidatedEmission, EmissionError> {
     let emission = block.emission().ok_or(EmissionError::MissingEmission)?;
 
@@ -254,16 +269,7 @@ pub(crate) fn authorize_emission(block: &Block) -> Result<ValidatedEmission, Emi
         .checked_sub(protocol_burn)
         .ok_or(EmissionError::InvalidSubsidy)?;
 
-    let bytes = canonical_bytes(&(
-        b"emission",
-        block.previous_hash(),
-        block.height(),
-        emission.to,
-        emission.subsidy,
-    ))
-    .map_err(|_| EmissionError::Serialization)?;
-
-    let origin = domain(HashDomain::Emission, &bytes);
+    let origin = emission_origin(block)?;
 
     Ok(ValidatedEmission {
         recipient: emission.to,

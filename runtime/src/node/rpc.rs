@@ -136,6 +136,23 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
+        route if route.starts_with("/coin-origin/") => {
+            let share = route.trim_start_matches("/coin-origin/");
+            if share.is_empty() || share.contains(['/', '?', '#']) {
+                return Err("invalid coin origin route".into());
+            }
+            let share = share
+                .parse::<kernel::monetary::coin::CoinShare>()
+                .map_err(|_| "invalid coin share")?;
+            let origin = index::coin_origin(database, &ledger, share)?;
+            serde_json::json!({
+                "coin_share": share.to_string(),
+                "origin": origin.map(|origin| serde_json::json!({
+                    "created_at": origin.created_at.map(|id| hex::encode(id.into_bytes())),
+                    "created_in": origin.created_in.0,
+                })),
+            })
+        }
         route if route.starts_with("/asset/") => asset_response(&ledger, route)?,
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");

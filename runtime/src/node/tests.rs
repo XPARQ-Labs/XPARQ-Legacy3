@@ -16,11 +16,9 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
         "/block/{height}",
         "/balance/{address}",
         "/account/{address}",
+        "/coin-origin/{share}",
         "/asset/{asset}",
         "/asset/{asset}/balance/{address}",
-        "/pools",
-        "/pool/{pool}",
-        "/pool/shares/{address}",
         "/explorer/address/{address}",
         "/explorer/transaction/{transaction_id}",
         "/transaction",
@@ -115,15 +113,17 @@ fn account_projection_lists_asset_supply_and_creator_shares() {
     assert_eq!(assets[0]["shares"].as_array().unwrap().len(), 1);
     assert_eq!(assets[0]["shares"][0]["amount"], "4");
     assert!(
-        assets[0]["shares"][0]["share_id"].as_str().unwrap().len() == kernel::crypto::HASH_SIZE * 2
+        assets[0]["shares"][0]["share_id"].as_str().unwrap().len()
+            == kernel::crypto::HASH16_SIZE * 2
     );
 }
 
 #[test]
 fn explorer_address_response_is_aggregate_only() {
     let ledger = kernel::genesis::genesis_ledger().unwrap();
+    let database = test_database("explorer-address-aggregate");
     let response = explorer_address_response(
-        Path::new("test explorer address"),
+        &database,
         &ledger,
         &[],
         Address([7; kernel::crypto::ADDRESS_SIZE]),

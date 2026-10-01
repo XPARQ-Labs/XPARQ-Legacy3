@@ -12,11 +12,12 @@ fn node_restarts_from_a_compact_snapshot() {
         common::{Height, Nonce},
         consensus::{
             apply_block, apply_genesis, expected_emission_for_height, expected_next_difficulty,
-            new_pow_memory,
+            new_pow_memory, validate_emission,
         },
         crypto::Address,
         genesis::{EXPECTED_GENESIS_HASH, genesis_block},
         ledger::Ledger,
+        monetary::coin::CoinShare,
     };
 
     let directory = std::env::temp_dir().join(format!(
@@ -75,6 +76,33 @@ fn node_restarts_from_a_compact_snapshot() {
         )
         .unwrap();
     }
+    let emission_id =
+        CoinShare::from_emission_origin(&validate_emission(&block).unwrap().origin().into_bytes());
+    assert_eq!(
+        storage::read_coin_origin(&directory, emission_id).unwrap(),
+        Some(storage::CoinOrigin {
+            created_at: None,
+            created_in: height,
+        })
+    );
+    let indexed = [&genesis, &block]
+        .into_iter()
+        .map(|block| storage::CanonicalIndexBlock {
+            height: block.height().0,
+            hash: block.hash().unwrap().0,
+            bytes: block_bytes(block).unwrap(),
+            transactions: vec![],
+            activities: vec![],
+        })
+        .collect::<Vec<_>>();
+    storage::rebuild_canonical_indexes(&directory, &indexed).unwrap();
+    assert_eq!(
+        storage::read_coin_origin(&directory, emission_id).unwrap(),
+        Some(storage::CoinOrigin {
+            created_at: None,
+            created_in: height
+        })
+    );
     snapshot::write_after_large_sync(
         &directory,
         &genesis_ledger,
@@ -102,8 +130,24 @@ fn node_restarts_from_a_compact_snapshot() {
     assert!(output.contains("height: 1"), "{output}");
     assert!(output.contains("database: valid"), "{output}");
 
-    let mut replacement = block;
-    replacement.header.nonce = Nonce(replacement.header.nonce.0 + 1);
+    let replacement = Block::from_protocol_transactions(
+        height,
+        genesis.hash().unwrap(),
+        block.header.target_bits,
+        Nonce(block.header.nonce.0 + 1),
+        Some(Emission::new(
+            Address::from_bytes([1; kernel::crypto::ADDRESS_SIZE]),
+            expected_emission_for_height(height),
+        )),
+        vec![],
+    )
+    .unwrap();
+    let replacement_id = CoinShare::from_emission_origin(
+        &validate_emission(&replacement)
+            .unwrap()
+            .origin()
+            .into_bytes(),
+    );
     let stored = [genesis, replacement]
         .into_iter()
         .map(|block| storage::StoredCanonicalBlock {
@@ -115,6 +159,17 @@ fn node_restarts_from_a_compact_snapshot() {
         })
         .collect::<Vec<_>>();
     storage::replace_blocks_and_mempool(&directory, &stored, &[]).unwrap();
+    assert_eq!(
+        storage::read_coin_origin(&directory, emission_id).unwrap(),
+        None
+    );
+    assert_eq!(
+        storage::read_coin_origin(&directory, replacement_id).unwrap(),
+        Some(storage::CoinOrigin {
+            created_at: None,
+            created_in: height
+        })
+    );
     let retained = storage::snapshots_descending(&directory).unwrap();
     assert_eq!(
         retained

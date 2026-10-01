@@ -11,14 +11,13 @@ fn mainnet_genesis_and_chain_spec_match_the_current_structure() {
             172, 185, 246, 186, 145, 237, 119, 232, 131, 179, 234, 188, 197
         ]
     );
-    // The target-bits header and current consensus parameters define a new chain
-    // identity while the native asset IDs below remain frozen independently.
-    assert_eq!(genesis::CHAIN_SPEC_VERSION, 3);
+    // The zero-valued native CoinContract is committed to this chain identity.
+    assert_eq!(genesis::CHAIN_SPEC_VERSION, 2);
     assert_eq!(
         genesis::chain_spec_hash().unwrap().into_bytes(),
         [
-            144, 110, 3, 100, 135, 55, 114, 199, 137, 213, 171, 190, 192, 239, 253, 238, 83, 94,
-            128, 32, 6, 176, 42, 116, 230, 235, 250, 179, 164, 76, 126, 0
+            5, 133, 226, 37, 189, 212, 180, 192, 65, 201, 197, 198, 84, 65, 2, 170, 226, 121,
+            80, 218, 199, 76, 86, 51, 101, 16, 3, 180, 12, 235, 149, 217
         ]
     );
     assert_ne!(

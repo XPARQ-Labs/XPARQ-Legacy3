@@ -31,8 +31,9 @@ pub use crate::error::{IntentError, TransactionEncodingError};
 pub use asset::{AssetInstruction, AssetIntent};
 pub use authorization::{
     AccountAuthorization, AccountIntent, AuthorizationCommitment, AuthorizationRole,
-    AuthorizedAccountIntent, AuthorizedAssetTransaction, AuthorizedTransaction, IntentId,
-    TransactionId, asset_call_commitment,
+    AuthorizedAccountIntent, AuthorizedAssetTransaction, AuthorizedProgramTransaction,
+    AuthorizedTransaction, IntentId, TransactionId, asset_call_commitment,
+    program_transaction_commitment,
 };
 pub use spend::{Spend, SpendCharges, SpendIntent, SpendIntentCommitment};
 
