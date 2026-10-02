@@ -21,7 +21,7 @@ impl UtxoSet {
         self.coins.get(id)
     }
 
-    pub fn insert_coin(&mut self, id: CoinShare, coin: CoinUtxo) -> Result<(), Error> {
+    pub(crate) fn insert_coin(&mut self, id: CoinShare, coin: CoinUtxo) -> Result<(), Error> {
         if self.coins.contains_key(&id) {
             return Err(Error::CoinCollision);
         }
@@ -29,7 +29,7 @@ impl UtxoSet {
         Ok(())
     }
 
-    pub fn consume_coin(&mut self, id: &CoinShare) -> Result<CoinUtxo, Error> {
+    pub(crate) fn consume_coin(&mut self, id: &CoinShare) -> Result<CoinUtxo, Error> {
         self.coins.remove(id).ok_or(Error::NotFound)
     }
 

@@ -10,87 +10,13 @@ use crate::{
     },
     monetary::coin::{CoinOutput, CoinShare, Zeno},
     transaction::{
-        AuthorizedAccountIntent, AuthorizedTransaction, IntentError, MAX_TRANSACTION_SIZE, Spend,
-        SpendIntent, SpendIntentCommitment, Transaction as OnChainTransaction,
+        AuthorizedTransaction, IntentError, MAX_TRANSACTION_SIZE, Transaction as OnChainTransaction,
     },
 };
 
-pub trait ConsensusIntent: Clone {
-    fn validate_structure(&self) -> Result<(), IntentError>;
-    fn commitment_for(&self, chain: ChainContext) -> Result<SpendIntentCommitment, IntentError>;
-}
-
-impl ConsensusIntent for SpendIntent {
-    fn validate_structure(&self) -> Result<(), IntentError> {
-        self.validate()
-    }
-
-    fn commitment_for(&self, chain: ChainContext) -> Result<SpendIntentCommitment, IntentError> {
-        self.semantic_commitment(chain)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructurallyValidated<T> {
-    intent: T,
-    commitment: SpendIntentCommitment,
-}
-
-impl<T> StructurallyValidated<T> {
-    pub fn intent(&self) -> &T {
-        &self.intent
-    }
-
-    pub const fn commitment(&self) -> SpendIntentCommitment {
-        self.commitment
-    }
-
-    pub fn into_intent(self) -> T {
-        self.intent
-    }
-}
-
-pub fn validate_intent<T: ConsensusIntent>(
-    intent: T,
-    chain: ChainContext,
-) -> Result<StructurallyValidated<T>, TransactionConsensusError> {
-    intent
-        .validate_structure()
-        .map_err(TransactionConsensusError::Intent)?;
-
-    let commitment = intent
-        .commitment_for(chain)
-        .map_err(TransactionConsensusError::Intent)?;
-
-    Ok(StructurallyValidated { intent, commitment })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorizationValidated<T> {
-    intent: T,
-    commitment: SpendIntentCommitment,
-}
-
-impl<T> AuthorizationValidated<T> {
-    pub fn intent(&self) -> &T {
-        &self.intent
-    }
-
-    pub const fn commitment(&self) -> SpendIntentCommitment {
-        self.commitment
-    }
-}
-
-/// Validated direct on-chain transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidatedTransaction {
-    CoinSpend(ValidatedCoinSpend),
     Program(crate::program::PreparedProgramTransaction),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedCoinSpend {
-    pub spend: AuthorizationValidated<SpendIntent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,16 +53,10 @@ pub fn validate_transaction(
     if transaction_size > MAX_TRANSACTION_SIZE {
         return Err(TransactionConsensusError::TransactionTooLarge);
     }
-    let canonical_transaction_weight = u64::try_from(transaction_size)
-        .map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))?;
-
     validate_authorization_gate(&transaction, chain, current_height)?;
-
-    if let AuthorizedTransaction::Program(tx) = transaction {
-        return crate::program::prepare_program_transaction(*tx, chain, current_height, state)
-            .map(ValidatedTransaction::Program);
-    }
-    validate_authorized_transaction(transaction, chain, canonical_transaction_weight, state)
+    let AuthorizedTransaction::Program(tx) = transaction;
+    crate::program::prepare_program_transaction(*tx, chain, current_height, state)
+        .map(ValidatedTransaction::Program)
 }
 
 fn validate_authorization_gate(
@@ -159,57 +79,6 @@ fn validate_authorization_gate(
     Ok(())
 }
 
-fn validate_authorized_transaction(
-    transaction: AuthorizedTransaction,
-    chain: ChainContext,
-    canonical_transaction_weight: u64,
-    state: &impl TransactionStateView,
-) -> Result<ValidatedTransaction, TransactionConsensusError> {
-    match transaction {
-        AuthorizedTransaction::Spend(transaction) => {
-            let transaction = *transaction;
-
-            let spend = prepare_spend_intent(transaction, chain)?;
-
-            match &spend.intent().spend {
-                Spend::Coin { inputs, outputs } => {
-                    let actual_burn = validate_coin_inputs(
-                        inputs,
-                        outputs,
-                        spend.intent().charges.miner_fee,
-                        spend.intent().signer,
-                        state,
-                    )?;
-
-                    validate_required_burn(
-                        actual_burn,
-                        StateTransitionWeight {
-                            created_coin_utxos: count_coin_outputs(
-                                outputs,
-                                spend.intent().charges.miner_fee,
-                            )?,
-                            consumed_coin_utxos: count_inputs(inputs.len())?,
-                            ..StateTransitionWeight::default()
-                        },
-                        canonical_transaction_weight,
-                    )?;
-
-                    Ok(ValidatedTransaction::CoinSpend(ValidatedCoinSpend {
-                        spend,
-                    }))
-                }
-            }
-        }
-        AuthorizedTransaction::Program(_) => {
-            unreachable!("Program envelopes are validated before dispatch")
-        }
-    }
-}
-
-fn count_inputs(len: usize) -> Result<u64, TransactionConsensusError> {
-    u64::try_from(len).map_err(|_| TransactionConsensusError::Burn(BurnError::WeightOverflow))
-}
-
 pub(crate) fn count_coin_outputs(
     outputs: &[CoinOutput],
     miner_fee: Zeno,
@@ -229,21 +98,6 @@ pub(crate) fn validate_required_burn(
 
     validate_exact_burn(actual, required)?;
     Ok(())
-}
-
-fn prepare_spend_intent(
-    authorized: AuthorizedAccountIntent<SpendIntent>,
-    chain: ChainContext,
-) -> Result<AuthorizationValidated<SpendIntent>, TransactionConsensusError> {
-    //
-    // Signature verification already happened at the transaction-level gate.
-    // Keep the semantic spend commitment for canonical output derivation.
-    //
-    let structurally_validated = validate_intent(authorized.intent, chain)?;
-    let commitment = structurally_validated.commitment();
-    let intent = structurally_validated.into_intent();
-
-    Ok(AuthorizationValidated { intent, commitment })
 }
 
 pub(crate) fn validate_coin_inputs(
@@ -356,7 +210,10 @@ mod p3e_authorization_gate_tests {
 
     use crate::{
         monetary::coin::{CoinOutput, Zeno},
-        transaction::{AccountAuthorization, AccountIntent},
+        transaction::{
+            AccountAuthorization, AuthorizedProgramTransaction, CoinTransition,
+            program_transaction_commitment,
+        },
     };
 
     const TEST_HEIGHT: u64 = 0;
@@ -373,10 +230,10 @@ mod p3e_authorization_gate_tests {
         ChainContext::new([tag; HASH_SIZE])
     }
 
-    fn coin_intent(seed: &SigningSeed, input_tag: u8, amount: u64) -> SpendIntent {
+    fn coin_intent(seed: &SigningSeed, input_tag: u8, amount: u64) -> CoinTransition {
         let owner = signer(seed);
 
-        SpendIntent::coin(
+        CoinTransition::coin(
             owner,
             vec![CoinShare::from_bytes([input_tag; HASH16_SIZE])],
             vec![CoinOutput::new(owner, Zeno::from_zeno(amount))],
@@ -384,17 +241,18 @@ mod p3e_authorization_gate_tests {
         .expect("valid coin fixture")
     }
 
-    fn authorize_principal<T: AccountIntent>(
-        intent: T,
+    fn authorize_transfer(
+        intent: CoinTransition,
         signer_seed: &SigningSeed,
         chain: ChainContext,
-    ) -> AuthorizedAccountIntent<T> {
-        let commitment = intent
-            .principal_commitment(chain)
-            .expect("principal authorization commitment");
-
-        AuthorizedAccountIntent {
-            intent,
+    ) -> AuthorizedProgramTransaction {
+        let signer = crypto::address_from_public_key(&signer_seed.public_key());
+        let call = extension::coin_program::transfer_call();
+        let commitment = program_transaction_commitment(signer, &call, &intent, chain).unwrap();
+        AuthorizedProgramTransaction {
+            signer,
+            call,
+            payment: intent,
             authorization: AccountAuthorization {
                 public_key: signer_seed.public_key(),
                 signature: signer_seed.sign(commitment.as_bytes()),
@@ -403,13 +261,13 @@ mod p3e_authorization_gate_tests {
     }
 
     #[test]
-    fn valid_direct_spend_passes_consensus_authorization_gate() {
+    fn valid_transfer_call_passes_consensus_authorization_gate() {
         let owner = seed(1);
         let chain = chain(0x11);
         let intent = coin_intent(&owner, 1, 10);
 
         let transaction =
-            AuthorizedTransaction::Spend(Box::new(authorize_principal(intent, &owner, chain)));
+            AuthorizedTransaction::Program(Box::new(authorize_transfer(intent, &owner, chain)));
 
         assert!(validate_authorization_gate(&transaction, chain, TEST_HEIGHT).is_ok());
     }
@@ -422,7 +280,7 @@ mod p3e_authorization_gate_tests {
         let intent = coin_intent(&owner, 2, 10);
 
         let transaction =
-            AuthorizedTransaction::Spend(Box::new(authorize_principal(intent, &owner, chain_a)));
+            AuthorizedTransaction::Program(Box::new(authorize_transfer(intent, &owner, chain_a)));
 
         assert!(matches!(
             validate_authorization_gate(&transaction, chain_b, TEST_HEIGHT),

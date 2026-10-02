@@ -11,7 +11,7 @@ use std::{
 use kernel::{
     crypto::{Signature, SigningSeed, address_from_public_key, address_to_string, canonical_bytes},
     monetary::coin::{CoinOutput, CoinShare, Zeno},
-    transaction::{AuthorizedTransaction, SpendIntent, Transaction},
+    transaction::{AuthorizedTransaction, CoinTransition, Transaction},
 };
 use serde_json::Value;
 use wallet::{AccountWallet, account_wallet_from_bip39_mnemonic, encode_bip39_mnemonic};
@@ -342,7 +342,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
     let mut archival_bytes = 0;
     let transaction = loop {
         let burn = state_burn.as_zeno() + archival_bytes;
-        let intent = SpendIntent::coin_with_charges(
+        let intent = CoinTransition::coin_with_charges(
             sender.address,
             vec![input_id],
             vec![
@@ -352,7 +352,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
                     Zeno::from_zeno(input_amount - sent.as_zeno() - burn - archival_bytes.max(1)),
                 ),
             ],
-            kernel::transaction::SpendCharges::new(Zeno::from_zeno(archival_bytes.max(1))),
+            kernel::transaction::CoinCharges::new(Zeno::from_zeno(archival_bytes.max(1))),
         )
         .unwrap();
         let transaction =
@@ -440,7 +440,7 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
     use kernel::{
         consensus::{ProtocolBurn, StateTransitionWeight},
         transaction::{
-            AccountAuthorization, AuthorizedProgramTransaction, SpendCharges,
+            AccountAuthorization, AuthorizedProgramTransaction, CoinCharges,
             program_transaction_commitment,
         },
     };
@@ -505,14 +505,14 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
         .total()
         .unwrap()
         .as_zeno();
-        let payment = SpendIntent::coin_with_charges(
+        let payment = CoinTransition::coin_with_charges(
             signer,
             vec![id],
             vec![CoinOutput::new(
                 signer,
                 Zeno::from_zeno(amount - burn - fee),
             )],
-            SpendCharges::new(Zeno::from_zeno(fee)),
+            CoinCharges::new(Zeno::from_zeno(fee)),
         )
         .unwrap();
         let commitment = program_transaction_commitment(signer, &call, &payment, chain).unwrap();

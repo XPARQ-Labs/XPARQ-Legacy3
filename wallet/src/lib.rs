@@ -1,11 +1,8 @@
 use bip39::{Language, Mnemonic};
 
-use kernel::{
-    crypto::{
-        Address, PublicKey, Signature, SigningSeed, address_from_public_key, address_from_string,
-        address_to_string, hash_bytes,
-    },
-    transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent},
+use kernel::crypto::{
+    Address, PublicKey, Signature, SigningSeed, address_from_public_key, address_from_string,
+    address_to_string, hash_bytes,
 };
 
 use serde::{Deserialize, Serialize};
@@ -242,36 +239,10 @@ impl AccountWallet {
         self.signing_seed.account()
     }
 
-    pub fn sign_account_intent<T: AccountIntent>(
-        &self,
-
-        intent: T,
-    ) -> Result<AuthorizedAccountIntent<T>, String> {
-        let chain = kernel::genesis::chain_context().map_err(|error| error.to_string())?;
-
-        let commitment = intent
-            .principal_commitment(chain)
-            .map_err(|error| error.to_string())?;
-
-        let signature = self.signing_seed.sign(commitment.as_bytes());
-
-        let authorization = AccountAuthorization {
-            public_key: self.public_key.clone(),
-
-            signature,
-        };
-
-        Ok(AuthorizedAccountIntent {
-            intent,
-
-            authorization,
-        })
-    }
-
     /// Sign a native XPQ.Transfer ProgramCall, binding its transfer and fee.
     pub fn sign_xpq_transfer(
         &self,
-        payment: kernel::transaction::SpendIntent,
+        payment: kernel::transaction::CoinTransition,
     ) -> Result<kernel::transaction::AuthorizedProgramTransaction, String> {
         self.sign_program_call(extension::coin_program::transfer_call(), payment)
     }
@@ -280,7 +251,7 @@ impl AccountWallet {
     pub fn sign_program_call(
         &self,
         call: extension::script::call::ProgramCall,
-        payment: kernel::transaction::SpendIntent,
+        payment: kernel::transaction::CoinTransition,
     ) -> Result<kernel::transaction::AuthorizedProgramTransaction, String> {
         let chain = kernel::genesis::chain_context().map_err(|e| e.to_string())?;
         let commitment = kernel::transaction::program_transaction_commitment(

@@ -622,15 +622,19 @@ The canonical block log remains required for startup and reorganization.
 
 ### Coin spends and Program assets
 
-The kernel stores native XPQ UTXOs. Assets live in the extension Program state
+The kernel owns native XPQ types and UTXOs. XPQ transfers execute through the
+extension coin program and a restricted kernel host; spend data cannot mutate
+the ledger directly. Wallet spends and consolidation use XPQ Program 0, method 1.
+Assets live in the extension Program state
 and use the wallet `program-*` commands. One Program signature binds the asset
 operation and its XPQ payment. Legacy asset transactions, combined spends and
 `asset-*` commands have been removed.
 
-See [ProgramCall usage](docs/PROGRAM_CALL_USAGE.md) for registration, mint,
+See [ProgramCall integration](docs/PROGRAM_CALL.md) for registration, mint,
 transfer, burn and consolidation instructions.
 
-All XPQ spend intents now carry `SpendCharges { miner_fee }`. The miner fee is
+All XPQ Program calls carry `CoinTransition` with `CoinCharges { miner_fee }`.
+The miner fee is
 credited to the block miner as a separate UTXO; it is no longer encoded as a
 normal coin output. The protocol burn remains the verified difference between
 XPQ inputs, address outputs, and the miner fee. This changes transaction bytes
@@ -639,7 +643,7 @@ planned chain reset.
 Coin outputs encode the recipient address directly; the obsolete block-miner
 recipient tag is no longer part of a spend output.
 
-The reset baseline uses chain spec version 1 and storage schema 6. Start with
+The reset baseline uses chain spec version 1 and storage schema 7. Start with
 fresh compatible storage; old assets and transactions are not migrated.
 
 Check the complete workspace:

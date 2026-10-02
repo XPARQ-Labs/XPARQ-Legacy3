@@ -288,7 +288,7 @@ mod payment_tests {
         consensus::{ProtocolBurn, StateTransitionWeight},
         ledger::{CoinUtxo, LedgerState},
         monetary::coin::{CoinOutput, CoinShare, Zeno},
-        transaction::{AuthorizedProgramTransaction, AuthorizedTransaction, SpendIntent},
+        transaction::{AuthorizedProgramTransaction, AuthorizedTransaction, CoinTransition},
     };
     use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
     use extension::{
@@ -326,13 +326,13 @@ mod payment_tests {
             )
             .unwrap();
         let original = state.clone();
-        let payment = SpendIntent::coin(
+        let payment = CoinTransition::coin(
             signer,
             vec![input],
             vec![CoinOutput::new(signer, Zeno::from_zeno(1))],
         )
         .unwrap();
-        let sign = |payment: SpendIntent| {
+        let sign = |payment: CoinTransition| {
             let commitment =
                 crate::transaction::program_transaction_commitment(signer, &call, &payment, chain)
                     .unwrap();
@@ -380,7 +380,8 @@ mod payment_tests {
         .unwrap();
         let output = Zeno::from_zeno(1_000_000).checked_sub(burn).unwrap();
         let tx = sign(
-            SpendIntent::coin(signer, vec![input], vec![CoinOutput::new(signer, output)]).unwrap(),
+            CoinTransition::coin(signer, vec![input], vec![CoinOutput::new(signer, output)])
+                .unwrap(),
         );
         let prepared = prepare_program_transaction(tx.clone(), chain, 0, &state).unwrap();
         assert_eq!(prepared.required_burn, burn);
@@ -403,11 +404,11 @@ mod payment_tests {
             .unwrap()
             .checked_sub(fee)
             .unwrap();
-        let payment = SpendIntent::coin_with_charges(
+        let payment = CoinTransition::coin_with_charges(
             signer,
             vec![input],
             vec![CoinOutput::new(signer, change)],
-            crate::transaction::SpendCharges::new(fee),
+            crate::transaction::CoinCharges::new(fee),
         )
         .unwrap();
         assert_eq!(
@@ -416,7 +417,7 @@ mod payment_tests {
                 .required_burn,
             fee_burn
         );
-        let underpaid = SpendIntent::coin(
+        let underpaid = CoinTransition::coin(
             signer,
             vec![input],
             vec![CoinOutput::new(
@@ -444,8 +445,8 @@ mod xpq_transfer_tests {
         ledger::{CoinUtxo, LedgerState},
         monetary::coin::{CoinOutput, CoinShare, Zeno},
         transaction::{
-            AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction,
-            SpendCharges, SpendIntent, program_transaction_commitment,
+            AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction, CoinCharges,
+            CoinTransition, program_transaction_commitment,
         },
     };
     use crypto::{Signature, SigningSeed, address_from_public_key};
@@ -484,14 +485,14 @@ mod xpq_transfer_tests {
             .total()
             .unwrap()
             .as_zeno();
-            let payment = SpendIntent::coin_with_charges(
+            let payment = CoinTransition::coin_with_charges(
                 owner,
                 vec![input],
                 vec![CoinOutput::new(
                     Address([94; crypto::ADDRESS_SIZE]),
                     Zeno::from_zeno(amount - burn - fee),
                 )],
-                SpendCharges::new(Zeno::from_zeno(fee)),
+                CoinCharges::new(Zeno::from_zeno(fee)),
             )
             .unwrap();
             let commitment = program_transaction_commitment(owner, &call, &payment, chain).unwrap();
@@ -526,9 +527,7 @@ mod xpq_transfer_tests {
             &state,
         )
         .unwrap();
-        let ValidatedTransaction::Program(prepared) = &validated else {
-            panic!("expected Program transaction")
-        };
+        let ValidatedTransaction::Program(prepared) = &validated;
         assert_eq!(prepared.created_state_weight, 0);
         let journal = state
             .apply_validated_transaction(&validated, Address([95; crypto::ADDRESS_SIZE]), chain)
@@ -566,5 +565,33 @@ mod xpq_transfer_tests {
                 .is_err()
         );
         assert_eq!(state, after);
+    }
+
+    #[test]
+    fn xpq_transfer_uses_ledger_owner_for_input_authorization() {
+        let (mut state, tx, chain) = fixture();
+        let input = tx.payment.coin_parts().unwrap().0[0];
+        state.utxos.consume_coin(&input).unwrap();
+        state
+            .utxos
+            .insert_coin(
+                input,
+                CoinUtxo {
+                    owner: Address([97; crypto::ADDRESS_SIZE]),
+                    amount: Zeno::from_zeno(1_000_000),
+                },
+            )
+            .unwrap();
+        let before = state.clone();
+        assert!(matches!(
+            validate_transaction(
+                AuthorizedTransaction::Program(Box::new(tx)),
+                chain,
+                1,
+                &state
+            ),
+            Err(crate::consensus::TransactionConsensusError::RecipientMismatch)
+        ));
+        assert_eq!(state, before);
     }
 }

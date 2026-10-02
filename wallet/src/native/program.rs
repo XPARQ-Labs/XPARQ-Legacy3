@@ -90,11 +90,11 @@ fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(
     } else {
         vec![]
     };
-    let payment = SpendIntent::coin_with_charges(
+    let payment = CoinTransition::coin_with_charges(
         wallet.address(),
         inputs,
         outputs,
-        SpendCharges::new(Zeno::ONE),
+        CoinCharges::new(Zeno::ONE),
     )
     .map_err(|e| e.to_string())?;
     let dummy = AuthorizedTransaction::Program(Box::new(
@@ -116,11 +116,11 @@ fn submit(args: &[String], wallet: &LoadedWallet, call: ProgramCall) -> Result<(
         } else {
             vec![]
         };
-        let payment = SpendIntent::coin_with_charges(
+        let payment = CoinTransition::coin_with_charges(
             wallet.address(),
             inputs,
             outputs,
-            SpendCharges::new(Zeno::from_zeno(fee)),
+            CoinCharges::new(Zeno::from_zeno(fee)),
         )
         .map_err(|e| e.to_string())?;
         Ok(AuthorizedTransaction::Program(Box::new(

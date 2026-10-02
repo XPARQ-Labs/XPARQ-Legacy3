@@ -15,7 +15,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 const DATABASE_FILE: &str = "xparq.redb";
 
 // Reset-chain schema stores coin-only UTXOs and Program extension state/journals.
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("canonical_blocks");
@@ -403,7 +403,6 @@ fn block_coin_origins(
     }
     for transaction in block.transactions() {
         let spend = match transaction {
-            AuthorizedTransaction::Spend(tx) => &tx.intent,
             AuthorizedTransaction::Program(tx) => &tx.payment,
         };
         let (_, outputs) = spend
@@ -460,7 +459,10 @@ mod coin_origin_tests {
         common::Nonce,
         crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key},
         monetary::coin::{CoinOutput, Zeno},
-        transaction::{AccountAuthorization, AccountIntent, AuthorizedAccountIntent, SpendIntent},
+        transaction::{
+            AccountAuthorization, AuthorizedProgramTransaction, CoinTransition,
+            program_transaction_commitment,
+        },
     };
 
     #[test]
@@ -468,16 +470,19 @@ mod coin_origin_tests {
         let seed = SigningSeed::new(AccountSignatureScheme::MlDsa44, Box::new([5; 32]));
         let signer = address_from_public_key(&seed.public_key());
         let chain = ChainContext::new([7; kernel::crypto::HASH_SIZE]);
-        let mut spend = SpendIntent::coin(
+        let mut spend = CoinTransition::coin(
             signer,
             vec![CoinShare::from_bytes([1; kernel::crypto::HASH16_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(10))],
         )
         .unwrap();
         spend.charges.miner_fee = Zeno::from_zeno(1);
-        let commitment = spend.principal_commitment(chain).unwrap();
-        let tx = AuthorizedTransaction::Spend(Box::new(AuthorizedAccountIntent {
-            intent: spend.clone(),
+        let call = extension::coin_program::transfer_call();
+        let commitment = program_transaction_commitment(signer, &call, &spend, chain).unwrap();
+        let tx = AuthorizedTransaction::Program(Box::new(AuthorizedProgramTransaction {
+            signer,
+            call,
+            payment: spend.clone(),
             authorization: AccountAuthorization {
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),

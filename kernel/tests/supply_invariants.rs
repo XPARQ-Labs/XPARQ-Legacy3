@@ -10,29 +10,19 @@ fn coin_utxos_must_equal_recorded_live_supply() {
     let id = CoinShare::from_bytes([1; HASH16_SIZE]);
     state.coin.total_mined = Zeno::from_zeno(100);
     state.coin.total_burned = Zeno::from_zeno(10);
-    state
-        .utxos
-        .insert_coin(
-            id,
-            CoinUtxo {
-                amount: Zeno::from_zeno(90),
-                owner: Address([2; 21]),
-            },
-        )
-        .unwrap();
+    // Deliberately forged serialized fixtures exercise the invariant without
+    // granting integration-test callers coin mutation capabilities.
+    let mut coins = std::collections::BTreeMap::from([(
+        id,
+        CoinUtxo {
+            amount: Zeno::from_zeno(90),
+            owner: Address([2; 21]),
+        },
+    )]);
+    state.utxos = borsh::from_slice(&borsh::to_vec(&coins).unwrap()).unwrap();
     assert!(state.validate_supply_invariants().is_ok());
-
-    state.utxos.consume_coin(&id).unwrap();
-    state
-        .utxos
-        .insert_coin(
-            id,
-            CoinUtxo {
-                amount: Zeno::from_zeno(91),
-                owner: Address([2; 21]),
-            },
-        )
-        .unwrap();
+    coins.get_mut(&id).unwrap().amount = Zeno::from_zeno(91);
+    state.utxos = borsh::from_slice(&borsh::to_vec(&coins).unwrap()).unwrap();
     assert!(matches!(
         state.validate_supply_invariants(),
         Err(LedgerError::CoinSupplyMismatch)

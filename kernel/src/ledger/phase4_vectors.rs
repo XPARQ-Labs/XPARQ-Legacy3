@@ -16,8 +16,8 @@ use crate::{
     genesis,
     monetary::coin::CoinOutput,
     transaction::{
-        AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedProgramTransaction,
-        AuthorizedTransaction, SpendCharges, SpendIntent, program_transaction_commitment,
+        AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction, CoinCharges,
+        CoinTransition, program_transaction_commitment,
     },
 };
 
@@ -64,13 +64,17 @@ fn next_block(ledger: &Ledger, miner: Address, transactions: Vec<AuthorizedTrans
 }
 
 fn signed_spend(
-    intent: SpendIntent,
+    intent: CoinTransition,
     seed: &SigningSeed,
     chain: crate::common::ChainContext,
 ) -> AuthorizedTransaction {
-    let commitment = intent.principal_commitment(chain).unwrap();
-    AuthorizedTransaction::Spend(Box::new(AuthorizedAccountIntent {
-        intent,
+    let signer = address_from_public_key(&seed.public_key());
+    let call = extension::coin_program::transfer_call();
+    let commitment = program_transaction_commitment(signer, &call, &intent, chain).unwrap();
+    AuthorizedTransaction::Program(Box::new(AuthorizedProgramTransaction {
+        signer,
+        call,
+        payment: intent,
         authorization: AccountAuthorization {
             public_key: seed.public_key(),
             signature: seed.sign(commitment.as_bytes()),
@@ -117,11 +121,11 @@ fn commit_program(ledger: &mut Ledger, seed: &SigningSeed, call: AssetCall) -> B
         .unwrap();
     let amount = coin.amount;
     let sign = |output| {
-        let payment = SpendIntent::coin_with_charges(
+        let payment = CoinTransition::coin_with_charges(
             signer,
             vec![input],
             vec![CoinOutput::new(signer, output)],
-            SpendCharges::new(Zeno::ONE),
+            CoinCharges::new(Zeno::ONE),
         )
         .unwrap();
         let commitment = program_transaction_commitment(signer, &call, &payment, chain).unwrap();
@@ -184,11 +188,11 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
 
     let (input, coin) = ledger.state.utxos.coins().next().unwrap();
     let fee = Zeno::from_zeno(1_000);
-    let draft = SpendIntent::coin_with_charges(
+    let draft = CoinTransition::coin_with_charges(
         owner,
         vec![input],
         vec![CoinOutput::new(recipient, Zeno::ONE)],
-        SpendCharges::new(fee),
+        CoinCharges::new(fee),
     )
     .unwrap();
     let draft_bytes = canonical_bytes(&signed_spend(draft, &seed, chain)).unwrap();
@@ -209,14 +213,20 @@ fn vector_data() -> Vec<(&'static str, Vec<u8>)> {
         .unwrap()
         .checked_sub(burn)
         .unwrap();
-    let intent = SpendIntent::coin_with_charges(
+    let intent = CoinTransition::coin_with_charges(
         owner,
         vec![input],
         vec![CoinOutput::new(recipient, amount)],
-        SpendCharges::new(fee),
+        CoinCharges::new(fee),
     )
     .unwrap();
-    let authorization_commitment = intent.principal_commitment(chain).unwrap();
+    let authorization_commitment = program_transaction_commitment(
+        owner,
+        &extension::coin_program::transfer_call(),
+        &intent,
+        chain,
+    )
+    .unwrap();
     let transaction = signed_spend(intent.clone(), &seed, chain);
     let transaction_bytes = canonical_bytes(&transaction).unwrap();
     assert_eq!(transaction_bytes.len(), draft_bytes.len());

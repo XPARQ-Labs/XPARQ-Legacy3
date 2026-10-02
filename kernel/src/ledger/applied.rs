@@ -1,8 +1,8 @@
 use crate::{
-    consensus::{AuthorizationValidated, ValidatedTransaction},
+    consensus::ValidatedTransaction,
     ledger::{CoinUtxo, LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
     monetary::coin::{CoinShare, Zeno},
-    transaction::{SpendIntent, SpendIntentCommitment},
+    transaction::{CoinTransition, CoinTransitionCommitment},
 };
 use crypto::Address;
 
@@ -34,47 +34,28 @@ impl LedgerState {
                     prepared.height,
                 )
                 .map_err(|_| StateError::InvalidTransaction),
-            ValidatedTransaction::CoinSpend(transaction) => {
-                let spend = self.apply_validated_onchain_spend(&transaction.spend, block_miner)?;
-                Ok(StateRollbackJournal {
-                    spend: Some(spend),
-                    extension: None,
-                })
-            }
         }
     }
 }
 
 //
-// Coin state transition
+// XPQ Program execution through a restricted coin host
 //
 
 impl LedgerState {
-    fn apply_validated_onchain_spend(
+    fn execute_coin_program(
         &mut self,
-        validated: &AuthorizationValidated<SpendIntent>,
+        intent: &CoinTransition,
+        commitment: CoinTransitionCommitment,
         block_miner: Address,
     ) -> Result<SpendRollbackJournal, StateError> {
-        self.apply_onchain_spend_with_commitment(
-            validated.intent(),
-            validated.commitment(),
-            block_miner,
-        )
+        self.execute_coin_program_with_checkpoint(intent, commitment, block_miner, |_| Ok(()))
     }
 
-    fn apply_onchain_spend_with_commitment(
+    fn execute_coin_program_with_checkpoint(
         &mut self,
-        intent: &SpendIntent,
-        commitment: SpendIntentCommitment,
-        block_miner: Address,
-    ) -> Result<SpendRollbackJournal, StateError> {
-        self.apply_onchain_spend_with_checkpoint(intent, commitment, block_miner, |_| Ok(()))
-    }
-
-    fn apply_onchain_spend_with_checkpoint(
-        &mut self,
-        intent: &SpendIntent,
-        commitment: SpendIntentCommitment,
+        intent: &CoinTransition,
+        commitment: CoinTransitionCommitment,
         block_miner: Address,
         mut checkpoint: impl FnMut(TransitionPoint) -> Result<(), StateError>,
     ) -> Result<SpendRollbackJournal, StateError> {
@@ -83,73 +64,95 @@ impl LedgerState {
         let result = (|| {
             let (inputs, outputs) = intent.coin_parts().ok_or(StateError::InvalidTransaction)?;
 
-            let input_total = inputs.iter().try_fold(Zeno::ZERO, |total, id| {
-                total
-                    .checked_add(
-                        self.utxos
-                            .coin(id)
-                            .ok_or(StateError::InvalidTransaction)?
-                            .amount,
-                    )
-                    .ok_or(StateError::AmountOverflow)
+            let outputs: Vec<_> = outputs
+                .iter()
+                .map(|output| (output.output, output.amount.as_zeno()))
+                .collect();
+            let mut host = KernelCoinHost {
+                state: self,
+                journal: &mut journal,
+                commitment,
+                output_count: outputs.len(),
+                checkpoint: &mut checkpoint,
+            };
+            extension::coin_program::execute_transfer(
+                &mut host,
+                inputs,
+                &outputs,
+                block_miner,
+                intent.charges.miner_fee.as_zeno(),
+            )
+            .map_err(|error| match error {
+                extension::coin_program::TransferError::Host(error) => error,
+                extension::coin_program::TransferError::InvalidBalance => {
+                    StateError::InvalidTransaction
+                }
+                extension::coin_program::TransferError::AmountOverflow => {
+                    StateError::AmountOverflow
+                }
+                extension::coin_program::TransferError::OutputIndexOverflow => {
+                    StateError::OutputIndexOverflow
+                }
             })?;
-            let output_total = outputs.iter().try_fold(Zeno::ZERO, |total, output| {
-                total
-                    .checked_add(output.amount)
-                    .ok_or(StateError::AmountOverflow)
-            })?;
-            let burn = input_total
-                .checked_sub(output_total)
-                .and_then(|value| value.checked_sub(intent.charges.miner_fee))
-                .ok_or(StateError::InvalidTransaction)?;
-
-            //
-            // Consume existing CoinShare objects.
-            //
-            for id in inputs {
-                let coin = self.utxos.consume_coin(id)?;
-                journal.consumed_coins.push((*id, coin));
-                checkpoint(TransitionPoint::CoinInputConsumed)?;
-            }
-
-            //
-            // Create new CoinShare objects.
-            //
-            for (index, output) in outputs.iter().enumerate() {
-                let id = coin_output_id(commitment, index)?;
-
-                self.utxos.insert_coin(
-                    id,
-                    CoinUtxo {
-                        amount: output.amount,
-                        owner: output.output,
-                    },
-                )?;
-
-                journal.created_coin_ids.push(id);
-                checkpoint(TransitionPoint::CoinOutputCreated)?;
-            }
-
-            if !intent.charges.miner_fee.is_zero() {
-                let id = coin_output_id(commitment, outputs.len())?;
-                self.utxos.insert_coin(
-                    id,
-                    CoinUtxo {
-                        amount: intent.charges.miner_fee,
-                        owner: block_miner,
-                    },
-                )?;
-                journal.created_coin_ids.push(id);
-                checkpoint(TransitionPoint::MinerFeeCreated)?;
-            }
-
-            self.record_protocol_burn(burn, &mut journal)?;
-            checkpoint(TransitionPoint::ProtocolBurnRecorded)?;
 
             Ok(())
         })();
 
         self.finish_spend_transition(journal, result)
+    }
+}
+
+/// Private adapter: only Program execution requests coin mutations. Consensus
+/// has already checked signatures, ownership, charges and input uniqueness.
+struct KernelCoinHost<'a, F> {
+    state: &'a mut LedgerState,
+    journal: &'a mut SpendRollbackJournal,
+    commitment: CoinTransitionCommitment,
+    output_count: usize,
+    checkpoint: &'a mut F,
+}
+
+impl<F: FnMut(TransitionPoint) -> Result<(), StateError>> extension::coin_program::CoinHost
+    for KernelCoinHost<'_, F>
+{
+    type CoinId = CoinShare;
+    type Error = StateError;
+
+    fn input_amount(&self, id: &CoinShare) -> Result<u64, StateError> {
+        self.state
+            .utxos
+            .coin(id)
+            .map(|coin| coin.amount.as_zeno())
+            .ok_or(StateError::InvalidTransaction)
+    }
+
+    fn consume(&mut self, id: CoinShare) -> Result<(), StateError> {
+        let coin = self.state.utxos.consume_coin(&id)?;
+        self.journal.consumed_coins.push((id, coin));
+        (self.checkpoint)(TransitionPoint::CoinInputConsumed)
+    }
+
+    fn create(&mut self, index: u32, owner: Address, amount: u64) -> Result<(), StateError> {
+        let id = CoinShare::from_output(self.commitment.as_bytes(), index);
+        self.state.utxos.insert_coin(
+            id,
+            CoinUtxo {
+                amount: Zeno::from_zeno(amount),
+                owner,
+            },
+        )?;
+        self.journal.created_coin_ids.push(id);
+        (self.checkpoint)(if index as usize == self.output_count {
+            TransitionPoint::MinerFeeCreated
+        } else {
+            TransitionPoint::CoinOutputCreated
+        })
+    }
+
+    fn burn(&mut self, amount: u64) -> Result<(), StateError> {
+        self.state
+            .record_protocol_burn(Zeno::from_zeno(amount), self.journal)?;
+        (self.checkpoint)(TransitionPoint::ProtocolBurnRecorded)
     }
 }
 
@@ -246,20 +249,6 @@ impl LedgerState {
     }
 }
 
-fn output_index(index: usize) -> Result<u32, StateError> {
-    u32::try_from(index).map_err(|_| StateError::OutputIndexOverflow)
-}
-
-fn coin_output_id(
-    commitment: SpendIntentCommitment,
-    index: usize,
-) -> Result<CoinShare, StateError> {
-    Ok(CoinShare::from_output(
-        commitment.as_bytes(),
-        output_index(index)?,
-    ))
-}
-
 impl LedgerState {
     /// Atomic execution of an authenticated Program transaction.
     /// Validation and both state transitions run on a clone, committed only on success.
@@ -278,7 +267,7 @@ impl LedgerState {
             .payment
             .semantic_commitment(chain)
             .map_err(crate::consensus::TransactionConsensusError::Intent)?;
-        let spend = staged.apply_onchain_spend_with_commitment(&tx.payment, commitment, miner)?;
+        let spend = staged.execute_coin_program(&tx.payment, commitment, miner)?;
         let journal = match extension::script::execute::decode_program(&tx.call)
             .map_err(|_| StateError::InvalidTransaction)?
         {
@@ -317,7 +306,7 @@ impl LedgerState {
 #[cfg(test)]
 mod coin_atomicity_tests {
     use super::*;
-    use crate::{monetary::coin::CoinOutput, transaction::SpendCharges};
+    use crate::{monetary::coin::CoinOutput, transaction::CoinCharges};
     use crypto::HASH_SIZE;
     fn address(byte: u8) -> Address {
         Address([byte; crypto::ADDRESS_SIZE])
@@ -339,17 +328,17 @@ mod coin_atomicity_tests {
                 },
             )
             .unwrap();
-        let intent = SpendIntent::coin_with_charges(
+        let intent = CoinTransition::coin_with_charges(
             owner,
             vec![input],
             vec![CoinOutput::new(address(2), Zeno::from_zeno(70))],
-            SpendCharges::new(Zeno::from_zeno(10)),
+            CoinCharges::new(Zeno::from_zeno(10)),
         )
         .unwrap();
-        let commitment = SpendIntentCommitment::from_bytes([4; HASH_SIZE]);
+        let commitment = CoinTransitionCommitment::from_bytes([4; HASH_SIZE]);
         let mut expected = original.clone();
         expected
-            .apply_onchain_spend_with_commitment(&intent, commitment, address(9))
+            .execute_coin_program(&intent, commitment, address(9))
             .unwrap();
         let expected_bytes = borsh::to_vec(&expected).unwrap();
 
@@ -361,7 +350,7 @@ mod coin_atomicity_tests {
         ] {
             let mut state = original.clone();
             assert!(matches!(
-                state.apply_onchain_spend_with_checkpoint(
+                state.execute_coin_program_with_checkpoint(
                     &intent,
                     commitment,
                     address(9),
@@ -375,7 +364,7 @@ mod coin_atomicity_tests {
             ));
             assert_eq!(state, original, "failure at {point:?}");
             state
-                .apply_onchain_spend_with_commitment(&intent, commitment, address(9))
+                .execute_coin_program(&intent, commitment, address(9))
                 .unwrap();
             assert_eq!(borsh::to_vec(&state).unwrap(), expected_bytes);
         }

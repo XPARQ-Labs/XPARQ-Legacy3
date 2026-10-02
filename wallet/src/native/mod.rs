@@ -10,7 +10,7 @@ use kernel::{
     codec::canonical_bytes,
     consensus::{DECIMALS, StateTransitionWeight},
     crypto::{Address, Signature, address_from_string},
-    transaction::{AuthorizedTransaction, SpendCharges, SpendIntent},
+    transaction::{AuthorizedTransaction, CoinCharges, CoinTransition},
 };
 use serde::Deserialize;
 use wallet::{
@@ -35,7 +35,7 @@ impl LoadedWallet {
 
     fn sign_onchain_spend(
         &self,
-        intent: SpendIntent,
+        intent: CoinTransition,
     ) -> Result<kernel::transaction::AuthorizedProgramTransaction, String> {
         self.0.sign_xpq_transfer(intent)
     }

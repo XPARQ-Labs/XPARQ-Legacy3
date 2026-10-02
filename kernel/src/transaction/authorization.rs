@@ -7,7 +7,7 @@ use crypto::{
 use extension::script::{call::ProgramCall, execute::decode_program};
 
 use crate::common::ChainContext;
-use crate::transaction::{IntentError, Spend, SpendIntent, TransactionEncodingError};
+use crate::transaction::{CoinTransition, IntentError, TransactionEncodingError};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
@@ -78,40 +78,7 @@ impl TransactionId {
 
 const TRANSACTION_INTENT_ID_TAG: [u8; 27] = *b"xparq:transaction-intent:v1";
 
-const INTENT_KIND_COIN_SPEND: u8 = 1;
 const INTENT_KIND_PROGRAM_CALL: u8 = 4;
-
-/// Something that can be authorized by an account.
-///
-/// Native coin spends use the Principal authorization role.
-pub trait AccountIntent {
-    fn sender(&self) -> Address;
-
-    fn principal_commitment(
-        &self,
-        chain: ChainContext,
-    ) -> Result<AuthorizationCommitment, IntentError>;
-}
-
-impl AccountIntent for SpendIntent {
-    fn sender(&self) -> Address {
-        self.signer
-    }
-
-    fn principal_commitment(
-        &self,
-        chain: ChainContext,
-    ) -> Result<AuthorizationCommitment, IntentError> {
-        self.validate()?;
-
-        let bytes = canonical_bytes(&(chain.genesis_hash, AuthorizationRole::Principal, self))
-            .map_err(|_| IntentError::Encoding)?;
-
-        Ok(AuthorizationCommitment::from_bytes(
-            domain(HashDomain::SpendIntent, &bytes).into_bytes(),
-        ))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AccountAuthorization {
@@ -147,26 +114,10 @@ impl AccountAuthorization {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct AuthorizedAccountIntent<T> {
-    pub intent: T,
-    pub authorization: AccountAuthorization,
-}
-
-impl<T: AccountIntent> AuthorizedAccountIntent<T> {
-    pub fn verify_principal(&self, chain: ChainContext, height: u64) -> Result<bool, IntentError> {
-        let commitment = self.intent.principal_commitment(chain)?;
-
-        Ok(self
-            .authorization
-            .verify_commitment(self.intent.sender(), &commitment, height))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AuthorizedProgramTransaction {
     pub signer: Address,
     pub call: ProgramCall,
-    pub payment: SpendIntent,
+    pub payment: CoinTransition,
     pub authorization: AccountAuthorization,
 }
 
@@ -174,8 +125,7 @@ impl AuthorizedProgramTransaction {
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         decode_program(&self.call).map_err(|_| IntentError::InvalidAssetCall)?;
         self.payment.validate()?;
-        if self.signer != self.payment.signer || !matches!(&self.payment.spend, Spend::Coin { .. })
-        {
+        if self.signer != self.payment.signer {
             return Err(IntentError::InvalidAssetCall);
         }
         Ok(())
@@ -198,12 +148,12 @@ impl AuthorizedProgramTransaction {
 pub fn program_transaction_commitment(
     signer: Address,
     call: &ProgramCall,
-    payment: &SpendIntent,
+    payment: &CoinTransition,
     chain: ChainContext,
 ) -> Result<AuthorizationCommitment, IntentError> {
     decode_program(call).map_err(|_| IntentError::InvalidAssetCall)?;
     payment.validate()?;
-    if signer != payment.signer || !matches!(&payment.spend, Spend::Coin { .. }) {
+    if signer != payment.signer {
         return Err(IntentError::InvalidAssetCall);
     }
     let bytes = canonical_bytes(&(
@@ -222,7 +172,6 @@ pub fn program_transaction_commitment(
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum AuthorizedTransaction {
-    Spend(Box<AuthorizedAccountIntent<SpendIntent>>),
     Program(Box<AuthorizedProgramTransaction>),
 }
 
@@ -240,14 +189,6 @@ impl AuthorizedTransaction {
             .map_err(|_| TransactionEncodingError::Encoding)?;
 
         let bytes = match self {
-            Self::Spend(tx) => match &tx.intent.spend {
-                Spend::Coin { .. } => canonical_bytes(&(
-                    TRANSACTION_INTENT_ID_TAG,
-                    INTENT_KIND_COIN_SPEND,
-                    &tx.intent,
-                )),
-            },
-
             Self::Program(tx) => canonical_bytes(&(
                 TRANSACTION_INTENT_ID_TAG,
                 INTENT_KIND_PROGRAM_CALL,
@@ -269,8 +210,6 @@ impl AuthorizedTransaction {
 
     pub fn validate_structure(&self) -> Result<(), IntentError> {
         match self {
-            Self::Spend(tx) => tx.intent.validate(),
-
             Self::Program(tx) => tx.validate_structure(),
         }
     }
@@ -283,8 +222,6 @@ impl AuthorizedTransaction {
         self.validate_structure()?;
 
         match self {
-            Self::Spend(tx) => tx.verify_principal(chain, height),
-
             Self::Program(tx) => tx.verify_authorizations(chain, height),
         }
     }
@@ -329,7 +266,7 @@ mod program_transaction_tests {
             })
             .unwrap(),
         };
-        let payment = SpendIntent::coin(
+        let payment = CoinTransition::coin(
             signer,
             vec![CoinShare::from_bytes([1; crypto::HASH16_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(1))],

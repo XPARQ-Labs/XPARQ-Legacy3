@@ -242,15 +242,6 @@ pub(super) fn address_transaction_activity(
     let authorized = transaction;
     let miner = block.miner_address();
     let (sender, outputs, extra_sent) = match authorized {
-        AuthorizedTransaction::Spend(tx) => {
-            let coin = &tx.intent;
-            coin.coin_parts().ok_or("spend payment is not coin")?;
-            (
-                Some(coin.signer),
-                coin_outputs_with_charges(&coin, miner),
-                Zeno::ZERO,
-            )
-        }
         AuthorizedTransaction::Program(tx) => (
             Some(tx.payment.signer),
             coin_outputs_with_charges(&tx.payment, miner),
@@ -359,20 +350,18 @@ pub(super) fn transaction_response(
     protocol_burn: Zeno,
 ) -> serde_json::Value {
     match transaction {
-        AuthorizedTransaction::Spend(spend) => spend_transaction_response(spend, protocol_burn),
-
         AuthorizedTransaction::Program(program) => {
             program_transaction_response(program, protocol_burn)
         }
     }
 }
 
-pub(super) fn coin_outputs(intent: &kernel::transaction::SpendIntent) -> &[CoinOutput] {
+pub(super) fn coin_outputs(intent: &kernel::transaction::CoinTransition) -> &[CoinOutput] {
     intent.coin_parts().map_or(&[], |(_, outputs)| outputs)
 }
 
 pub(super) fn coin_outputs_with_charges(
-    intent: &kernel::transaction::SpendIntent,
+    intent: &kernel::transaction::CoinTransition,
     miner: Address,
 ) -> Vec<CoinOutput> {
     let mut outputs = coin_outputs(intent).to_vec();
@@ -382,23 +371,8 @@ pub(super) fn coin_outputs_with_charges(
     outputs
 }
 
-pub(super) fn coin_burn(_intent: &kernel::transaction::SpendIntent) -> Zeno {
+pub(super) fn coin_burn(_intent: &kernel::transaction::CoinTransition) -> Zeno {
     Zeno::ZERO
-}
-
-pub(super) fn spend_transaction_response(
-    transaction: &kernel::transaction::AuthorizedAccountIntent<kernel::transaction::SpendIntent>,
-    protocol_burn: Zeno,
-) -> serde_json::Value {
-    match &transaction.intent.spend {
-        kernel::transaction::Spend::Coin { inputs, outputs } => serde_json::json!({
-            "type": "coin", "signer": kernel::crypto::address_to_string(&transaction.intent.signer),
-            "inputs": inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "outputs": public_outputs_response(&outputs, Some(transaction.intent.signer)),
-            "miner_fee": transaction.intent.charges.miner_fee.as_zeno(),
-            "protocol_burn": protocol_burn.as_zeno(),
-        }),
-    }
 }
 
 pub(super) fn asset_owner_response(owner: Address) -> serde_json::Value {
@@ -406,30 +380,6 @@ pub(super) fn asset_owner_response(owner: Address) -> serde_json::Value {
         "type": "account",
         "address": kernel::crypto::address_to_string(&owner),
     })
-}
-
-pub(super) fn public_outputs_response(
-    outputs: &[CoinOutput],
-    sender: Option<Address>,
-) -> Vec<serde_json::Value> {
-    outputs
-        .iter()
-        .map(|output| {
-            let address = output.output;
-            let role = if sender == Some(address) {
-                "change"
-            } else {
-                "recipient"
-            };
-            serde_json::json!({
-                "address": kernel::crypto::address_to_string(&address),
-                "amount": output.amount.as_zeno(),
-                "unit": "zeno",
-                "type": "address",
-                "role": role,
-            })
-        })
-        .collect()
 }
 
 pub(super) fn output_recipient(output: &CoinOutput) -> Address {
@@ -448,9 +398,6 @@ pub(super) fn checked_output_sum(amounts: impl IntoIterator<Item = Zeno>) -> Res
 
 pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
     match transaction {
-        AuthorizedTransaction::Spend(spend) => match &spend.intent.spend {
-            kernel::transaction::Spend::Coin { .. } => "transfer",
-        },
         AuthorizedTransaction::Program(tx)
             if tx.call.program == extension::script::call::ProgramId::XPQ =>
         {

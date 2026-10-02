@@ -106,9 +106,7 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         }
         let tx: Transaction = canonical_decode(&request.body)
             .map_err(|e| format!("invalid quote transaction: {e}"))?;
-        let AuthorizedTransaction::Program(tx) = tx else {
-            return Err("quote requires a Program transaction".into());
-        };
+        let AuthorizedTransaction::Program(tx) = tx;
         let (ledger, _, _, _) = load_or_initialize_header_snapshot(database)?;
         let chain = kernel::genesis::chain_context().map_err(|e| e.to_string())?;
         let height = ledger.tip_height().map_or(0, |h| h.0.saturating_add(1));

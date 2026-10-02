@@ -244,7 +244,7 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
             .unwrap();
     let recipient = Address([4; kernel::crypto::ADDRESS_SIZE]);
     let miner = Address([5; kernel::crypto::ADDRESS_SIZE]);
-    let intent = kernel::transaction::SpendIntent::coin(
+    let intent = kernel::transaction::CoinTransition::coin(
         sender.address,
         vec![kernel::monetary::coin::CoinShare::from_bytes(
             [6; kernel::monetary::coin::CoinShare::SIZE],
@@ -256,7 +256,7 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
     )
     .unwrap();
     let transaction =
-        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()));
+        AuthorizedTransaction::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()));
     let genesis = genesis_block().unwrap();
     let block = Block::from_protocol_transactions(
         Height(1),
@@ -330,8 +330,15 @@ fn failed_reorg_root_check_keeps_persisted_canonical_chain() {
     let (coin_id, coin) = altered.state.utxos.coins().next().expect("emission coin");
     let mut coin = *coin;
     coin.owner = Address([0xa2; kernel::crypto::ADDRESS_SIZE]);
-    altered.state.utxos.consume_coin(&coin_id).unwrap();
-    altered.state.utxos.insert_coin(coin_id, coin).unwrap();
+    // Forge a serialized fixture without exposing ledger mutation APIs.
+    let mut coins: std::collections::BTreeMap<_, _> = altered
+        .state
+        .utxos
+        .coins()
+        .map(|(id, coin)| (id, *coin))
+        .collect();
+    coins.insert(coin_id, coin);
+    altered.state.utxos = borsh::from_slice(&borsh::to_vec(&coins).unwrap()).unwrap();
     assert!(altered.state.validate_supply_invariants().is_ok());
     update_ledger_cache(&database, altered).unwrap();
 
@@ -638,7 +645,7 @@ fn explorer_tx_index_finds_canonical_transaction() {
 
     let miner = Address([0x33; kernel::crypto::ADDRESS_SIZE]);
 
-    let intent = kernel::transaction::SpendIntent::coin(
+    let intent = kernel::transaction::CoinTransition::coin(
         sender.address,
         vec![kernel::monetary::coin::CoinShare::from_bytes(
             [0x34; kernel::monetary::coin::CoinShare::SIZE],
@@ -648,7 +655,7 @@ fn explorer_tx_index_finds_canonical_transaction() {
     .unwrap();
 
     let transaction =
-        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()));
+        AuthorizedTransaction::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()));
 
     let transaction_hash = transaction.id().expect("transaction ID");
 
@@ -777,7 +784,7 @@ fn explorer_index_extends_after_canonical_append() {
 
         let recipient = Address([recipient_byte; kernel::crypto::ADDRESS_SIZE]);
 
-        let intent = kernel::transaction::SpendIntent::coin(
+        let intent = kernel::transaction::CoinTransition::coin(
             sender.address,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
@@ -786,7 +793,7 @@ fn explorer_index_extends_after_canonical_append() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
+        AuthorizedTransaction::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()))
     };
 
     let transaction_one = make_transaction(0x42, 0x43, 0x44);
@@ -878,7 +885,7 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
 
         let recipient = Address([recipient_byte; kernel::crypto::ADDRESS_SIZE]);
 
-        let intent = kernel::transaction::SpendIntent::coin(
+        let intent = kernel::transaction::CoinTransition::coin(
             sender.address,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
@@ -887,7 +894,7 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
+        AuthorizedTransaction::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()))
     };
 
     let target_bits = ledger
@@ -988,7 +995,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         )
         .unwrap();
 
-        let intent = kernel::transaction::SpendIntent::coin(
+        let intent = kernel::transaction::CoinTransition::coin(
             sender.address,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
@@ -997,7 +1004,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
+        AuthorizedTransaction::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()))
     };
 
     let target_bits = ledger
@@ -1312,7 +1319,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
 
         let recipient = Address([recipient_byte; kernel::crypto::ADDRESS_SIZE]);
 
-        let intent = kernel::transaction::SpendIntent::coin(
+        let intent = kernel::transaction::CoinTransition::coin(
             sender.address,
             vec![kernel::monetary::coin::CoinShare::from_bytes(
                 [input_byte; kernel::monetary::coin::CoinShare::SIZE],
@@ -1321,7 +1328,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
         )
         .unwrap();
 
-        AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()))
+        AuthorizedTransaction::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()))
     };
 
     let target_bits = ledger

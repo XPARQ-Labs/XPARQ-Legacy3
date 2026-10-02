@@ -50,25 +50,14 @@ fn transaction_addresses(
     let mut addresses = BTreeSet::new();
 
     let (sender, outputs) = match transaction {
-        AuthorizedTransaction::Spend(transaction) => {
-            let coin = &transaction.intent;
-
-            coin.coin_parts().ok_or("spend payment is not coin")?;
-            (
-                coin.signer,
-                explorer::coin_outputs_with_charges(&coin, miner),
-            )
-        }
-
         AuthorizedTransaction::Program(transaction) => (
             transaction.payment.signer,
             explorer::coin_outputs_with_charges(&transaction.payment, miner),
         ),
     };
 
-    if let AuthorizedTransaction::Program(tx) = transaction {
-        addresses.extend(explorer::program_recipients(tx));
-    }
+    let AuthorizedTransaction::Program(tx) = transaction;
+    addresses.extend(explorer::program_recipients(tx));
     addresses.insert(sender);
 
     for output in outputs {

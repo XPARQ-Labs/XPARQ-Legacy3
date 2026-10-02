@@ -9,7 +9,7 @@ use extension::{
 };
 use kernel::{
     consensus::{ProtocolBurn, StateTransitionWeight},
-    transaction::SpendCharges,
+    transaction::CoinCharges,
 };
 
 fn signed_program(rpc: &str, owner: &AccountWallet, instruction: &AssetCall) -> Transaction {
@@ -50,14 +50,14 @@ fn signed_program(rpc: &str, owner: &AccountWallet, instruction: &AssetCall) -> 
         .total()
         .unwrap()
         .as_zeno();
-        let payment = SpendIntent::coin_with_charges(
+        let payment = CoinTransition::coin_with_charges(
             owner.address,
             vec![id],
             vec![CoinOutput::new(
                 owner.address,
                 Zeno::from_zeno(amount.checked_sub(burn + fee).unwrap()),
             )],
-            SpendCharges::new(Zeno::from_zeno(fee)),
+            CoinCharges::new(Zeno::from_zeno(fee)),
         )
         .unwrap();
         let transaction = AuthorizedTransaction::Program(Box::new(
@@ -191,10 +191,8 @@ fn program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg() {
         // Only one node receives an RPC submission; alternate the ingress direction.
         let ingress = if step % 2 == 0 { &ar } else { &cr };
         let tx = signed_program(ingress, &owner, &instruction);
-        let input = match &tx {
-            AuthorizedTransaction::Program(tx) => tx.payment.coin_parts().unwrap().0[0].to_string(),
-            _ => unreachable!(),
-        };
+        let AuthorizedTransaction::Program(program) = &tx;
+        let input = program.payment.coin_parts().unwrap().0[0].to_string();
         let hash = hex::encode(tx.id().unwrap());
         assert_eq!(post_transaction(ingress, &tx)["hash"], hash);
         for rpc in [&ar, &br, &cr] {

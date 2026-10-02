@@ -92,11 +92,20 @@ pub(super) fn print_history_page(mut history: AddressHistoryResponse) -> Option<
             println!("  Amount: {}", format_amount(activity.amount));
             println!("  Size: {} bytes", activity.size_bytes.unwrap_or(0));
             if let Some(program) = activity.program {
-                println!("  Asset Operation: {}", program["operation"].as_str().unwrap_or("unknown"));
-                println!("  Program Asset: {}", program["asset"].as_str().unwrap_or("-"));
+                println!(
+                    "  Asset Operation: {}",
+                    program["operation"].as_str().unwrap_or("unknown")
+                );
+                println!(
+                    "  Program Asset: {}",
+                    program["asset"].as_str().unwrap_or("-")
+                );
                 let amount = program["amount"].as_str().unwrap_or("0");
-                let display = super::cli::format_asset_amount(amount, extension::asset_program::asset::ASSET_DECIMALS)
-                    .unwrap_or_else(|_| "invalid amount".into());
+                let display = super::cli::format_asset_amount(
+                    amount,
+                    extension::asset_program::asset::ASSET_DECIMALS,
+                )
+                .unwrap_or_else(|_| "invalid amount".into());
                 println!("  Asset Amount: {display}");
             }
         }

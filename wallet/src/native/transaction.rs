@@ -61,11 +61,11 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
         if change > 0 {
             outputs.push(CoinOutput::new(change_address, Zeno::from_zeno(change)));
         }
-        let intent = SpendIntent::coin_with_charges(
+        let intent = CoinTransition::coin_with_charges(
             wallet.address(),
             selected,
             outputs,
-            SpendCharges::new(Zeno::from_zeno(fee)),
+            CoinCharges::new(Zeno::from_zeno(fee)),
         )
         .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent)?;
@@ -125,11 +125,11 @@ pub(super) fn consolidate_coin_utxos(args: &[String]) -> Result<(), String> {
             wallet.address(),
             Zeno::from_zeno(consolidated),
         )];
-        let intent = SpendIntent::coin_with_charges(
+        let intent = CoinTransition::coin_with_charges(
             wallet.address(),
             inputs.clone(),
             outputs,
-            SpendCharges::new(Zeno::from_zeno(fee)),
+            CoinCharges::new(Zeno::from_zeno(fee)),
         )
         .map_err(|error| error.to_string())?;
         let signed = wallet.sign_onchain_spend(intent)?;

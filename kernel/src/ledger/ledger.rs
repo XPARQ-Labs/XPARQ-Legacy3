@@ -14,7 +14,7 @@ use crate::{
     },
     ledger::{CoinUtxo, LedgerState, SpendRollbackJournal, StateError, StateRollbackJournal},
     monetary::coin::{CoinShare, Zeno},
-    transaction::SpendIntent,
+    transaction::CoinTransition,
 };
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -212,10 +212,8 @@ impl Ledger {
         for transaction in block.transactions() {
             let validated =
                 validate_transaction(transaction.clone(), chain_context, height.0, &state)?;
-            let spend = match &validated {
-                ValidatedTransaction::CoinSpend(tx) => tx.spend.intent(),
-                ValidatedTransaction::Program(tx) => &tx.transaction.payment,
-            };
+            let ValidatedTransaction::Program(tx) = &validated;
+            let spend = &tx.transaction.payment;
             let burn = expected_spend_burn(&state, spend)?;
             expected_burns = expected_burns
                 .checked_add(burn)
@@ -326,7 +324,7 @@ fn coin_utxo_total(state: &LedgerState) -> Result<Zeno, LedgerError> {
         })
 }
 
-fn expected_spend_burn(state: &LedgerState, intent: &SpendIntent) -> Result<Zeno, LedgerError> {
+fn expected_spend_burn(state: &LedgerState, intent: &CoinTransition) -> Result<Zeno, LedgerError> {
     let (inputs, outputs) = intent
         .coin_parts()
         .ok_or(LedgerError::BlockAccountingMismatch)?;
@@ -1106,8 +1104,8 @@ mod p3e_block_atomicity_tests {
         use crate::consensus::{ProtocolBurn, StateTransitionWeight};
         use crate::monetary::coin::CoinOutput;
         use crate::transaction::{
-            AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction, SpendIntent,
-            program_transaction_commitment,
+            AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction,
+            CoinTransition, program_transaction_commitment,
         };
         use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
         use extension::{
@@ -1142,7 +1140,7 @@ mod p3e_block_atomicity_tests {
         };
         let sign = |output| {
             let payment =
-                SpendIntent::coin(signer, vec![input], vec![CoinOutput::new(signer, output)])
+                CoinTransition::coin(signer, vec![input], vec![CoinOutput::new(signer, output)])
                     .unwrap();
             let commitment =
                 program_transaction_commitment(signer, &call, &payment, chain).unwrap();
@@ -1253,7 +1251,7 @@ mod p3e_block_atomicity_tests {
             monetary::coin::CoinOutput,
             transaction::{
                 AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction,
-                SpendCharges, program_transaction_commitment,
+                CoinCharges, program_transaction_commitment,
             },
         };
         use crypto::{AccountSignatureScheme, SigningSeed, address_from_public_key};
@@ -1305,11 +1303,11 @@ mod p3e_block_atomicity_tests {
                 .unwrap();
             let amount = coin.amount;
             let sign = |output| {
-                let payment = SpendIntent::coin_with_charges(
+                let payment = CoinTransition::coin_with_charges(
                     signer,
                     vec![input],
                     vec![CoinOutput::new(signer, output)],
-                    SpendCharges::new(Zeno::ONE),
+                    CoinCharges::new(Zeno::ONE),
                 )
                 .unwrap();
                 let commitment =

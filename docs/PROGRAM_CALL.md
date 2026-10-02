@@ -10,7 +10,7 @@ For CLI instructions, see [Program asset commands](../wallet/README.md#extension
 | `kernel::ledger::utxo::UtxoSet` | XPQ UTXOs only: amount and owner, indexed by CoinShare |
 | `LedgerState.coin` | XPQ mined/burned counters and live supply |
 | `LedgerState.extensions` | Canonical extension state, including Program asset records and shares |
-| `AuthorizedTransaction` | Native coin spend or signed Program call with XPQ payment |
+| `AuthorizedTransaction` | Signed Program call with an XPQ coin transition |
 | `StateRollbackJournal` | Coin spend journal and optional extension journal |
 
 The legacy `LedgerState.assets`, asset shares in `UtxoSet`, `AssetIntent`,
@@ -20,6 +20,29 @@ removed as well. Asset definitions and execution live in `extension`.
 
 The XPQ supply invariant remains `total_mined - total_burned = sum(live coin
 UTXOs)`. Program asset supply is checked independently against extension shares.
+
+## Native XPQ transfer boundary
+
+`kernel::monetary::coin` owns the XPQ amount, contract, share and output types.
+The XPQ contract identity remains zero. The kernel owns coin UTXOs and monetary
+counters; the extension does not import the kernel or receive a mutable ledger.
+
+Wallet spends and consolidation use `ProgramId::XPQ` (0), method `TRANSFER` (1).
+Transfer data is the authenticated envelope's `payment` field; the call payload
+is empty. Kernel preparation checks signatures, ownership, duplicate inputs,
+conservation and required fees/burn before execution.
+
+`extension::coin_program::execute_transfer` controls input consumption, output
+creation, the miner-fee output and protocol burn through a restricted `CoinHost`.
+A private kernel adapter implements that capability and records rollback data.
+The kernel commits Program transactions only after execution and supply checks
+succeed. Raw UTXO insertion/removal is unavailable to other crates.
+
+`CoinTransition` carries the authenticated coin inputs, outputs, and miner fee
+for a Program call. The native `Spend` transaction variant has been removed.
+Asset-call XPQ funding uses the same executor. Block emission and rollback remain
+kernel consensus operations. The transaction encoding and derived output IDs
+change, so this revision requires fresh chain storage.
 
 ## Implemented: payment preparation and canonical state
 
@@ -32,7 +55,7 @@ growth burn. Extension growth is the positive difference between canonical
 extension state sizes before and after the call (bytes). Net created coin UTXOs,
 including an optional miner-fee output, use the existing coin state weight.
 State shrinkage earns no refund. Miner fee is explicitly deducted separately.
-The payment signer must equal the call signer; payment must be a coin spend.
+The coin-transition signer must equal the call signer.
 The signature binds call, payment, chain and principal authorization role.
 Preparation does not mutate ledger state; consensus uses its result for Program validation.
 
@@ -43,7 +66,7 @@ ordered by BTreeMap. Changes to either affect the root.
 
 ## Compatibility
 
-The reset baseline uses chain spec version **1**; storage schema is **6**.
+The reset baseline uses chain spec version **1**; storage schema is **7**.
 Canonical state bytes and
 nonempty state roots changed even while the extension is empty. The canonical
 genesis block remains unchanged. Use fresh compatible chain storage after the

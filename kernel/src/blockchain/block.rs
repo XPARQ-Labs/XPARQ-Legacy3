@@ -490,8 +490,8 @@ mod p3e_replay_tests {
         common::ChainContext,
         monetary::coin::{CoinOutput, CoinShare, Zeno},
         transaction::{
-            AccountAuthorization, AccountIntent, AuthorizedAccountIntent, AuthorizedTransaction,
-            SpendIntent,
+            AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction,
+            CoinTransition, program_transaction_commitment,
         },
     };
 
@@ -501,19 +501,21 @@ mod p3e_replay_tests {
         let signer = address_from_public_key(&seed.public_key());
         let chain = ChainContext::new([0x71; crypto::HASH_SIZE]);
 
-        let intent = SpendIntent::coin(
+        let intent = CoinTransition::coin(
             signer,
             vec![CoinShare::from_bytes([0x31; crypto::HASH16_SIZE])],
             vec![CoinOutput::new(signer, Zeno::from_zeno(1))],
         )
         .expect("valid structural spend fixture");
 
-        let commitment = intent
-            .principal_commitment(chain)
+        let call = extension::coin_program::transfer_call();
+        let commitment = program_transaction_commitment(signer, &call, &intent, chain)
             .expect("authorization commitment");
 
-        AuthorizedTransaction::Spend(Box::new(AuthorizedAccountIntent {
-            intent,
+        AuthorizedTransaction::Program(Box::new(AuthorizedProgramTransaction {
+            signer,
+            call,
+            payment: intent,
             authorization: AccountAuthorization {
                 public_key: seed.public_key(),
                 signature: seed.sign(commitment.as_bytes()),

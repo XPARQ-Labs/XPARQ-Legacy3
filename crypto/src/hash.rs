@@ -299,7 +299,7 @@ impl PartialEq<PreviousHash> for BlockHash {
 pub enum HashDomain {
     Transaction,
     TransactionCommit,
-    SpendIntent,
+    CoinTransition,
     AssetIntent,
     Block,
     Header,
@@ -329,7 +329,7 @@ impl HashDomain {
         match self {
             HashDomain::Transaction => b"XPARQ_HASH_TX",
             HashDomain::TransactionCommit => b"XPARQ_HASH_TX_COMMIT",
-            HashDomain::SpendIntent => b"XPARQ_SPEND_INTENT",
+            HashDomain::CoinTransition => b"XPARQ_COIN_TRANSITION",
             HashDomain::AssetIntent => b"XPARQ_ASSET_INTENT",
             HashDomain::Block => b"XPARQ_HASH_BLOCK",
             HashDomain::Header => b"XPARQ_HASH_BLOCK_HEADER",
