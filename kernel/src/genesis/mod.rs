@@ -168,8 +168,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 
         // Native protocol identity
         native_coin_contract: CoinContract::derive().into_bytes(),
-        extension_asset_program: "xparq-extension-asset-program-v1",
-        transaction_format: "coin-spend-and-program-v1",
+        extension_asset_program: "xparq-native-xpq-and-asset-program-v2",
+        transaction_format: "coin-spend-and-xpq-asset-program-v2",
         application_state_format: "coin-utxo-and-extension-state-v1",
     };
 
@@ -186,8 +186,8 @@ mod phase3_chain_spec_tests {
         assert_eq!(
             super::chain_spec_hash().unwrap().into_bytes(),
             [
-                75, 41, 124, 251, 231, 121, 69, 241, 13, 211, 192, 109, 134, 210, 84, 221, 53, 152,
-                129, 181, 200, 78, 95, 222, 110, 114, 158, 92, 149, 58, 47, 91
+                15, 10, 186, 109, 51, 26, 242, 9, 241, 114, 242, 79, 187, 111, 212, 186, 54, 12,
+                153, 42, 162, 245, 43, 28, 55, 135, 120, 208, 241, 229, 64, 2
             ]
         );
     }

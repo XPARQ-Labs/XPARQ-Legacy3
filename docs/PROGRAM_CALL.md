@@ -1,6 +1,6 @@
 # ProgramCall integration status
 
-For CLI instructions, see [Panduan penggunaan ProgramCall](PROGRAM_CALL_USAGE.md).
+For CLI instructions, see [Program asset commands](../wallet/README.md#extension-asset-program).
 
 ## Current structure after legacy asset removal
 
@@ -122,19 +122,24 @@ cargo check --workspace --all-targets --offline
 cargo test --workspace --offline
 cargo build -p node -p wallet --bins --offline
 cargo test -p wallet --test program_e2e --offline -- --ignored --test-threads=1
+cargo test -p node --test network_e2e --offline program_lifecycle_gossips_across_three_nodes_and_rolls_back_on_reorg -- --nocapture
 git diff --check
 ```
 
 Node and CLI integration tests open localhost RPC/P2P ports and need an
-environment that permits local socket binding. The five network tests cover
-block gossip, coin transaction gossip, fork synchronization and single-node
-Program submission/restart; they do not establish multi-node Program gossip
-coverage.
+environment that permits local socket binding. The network suite covers block
+gossip, coin transaction gossip, fork synchronization, DDNS discovery/restart,
+and Program submission/restart. The three-node Program lifecycle test submits
+register, mint, transfer, burn and consolidation at alternating network endpoints,
+checks mempool propagation before mining on another node, and compares asset
+metadata and shares after each confirmed block. It also checks restart recovery
+and rollback of four Program operations to a stronger fork, including removal of
+orphan transactions from the canonical explorer index.
 
 ## Next
 
-Verify Program gossip and deeper forks before release. GUI wallet/asset pages
-remain deferred.
+Extend invalid Program transaction and deeper-fork coverage before release.
+GUI wallet/asset pages remain deferred.
 
 The isolated `AuthorizedProgramCall` bridge is for standalone extension tests;
 on-chain calls must use the envelope that also authorizes their XPQ payment.

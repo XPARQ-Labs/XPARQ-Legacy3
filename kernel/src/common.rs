@@ -1,20 +1,11 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crypto::{Address, HASH_SIZE};
+use crypto::Address;
 
 use crate::monetary::coin::Zeno;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
-pub struct ChainContext {
-    pub genesis_hash: [u8; HASH_SIZE],
-}
-
-impl ChainContext {
-    pub const fn new(genesis_hash: [u8; HASH_SIZE]) -> Self {
-        Self { genesis_hash }
-    }
-}
+pub use crypto::ChainContext;
 
 #[derive(
     BorshSerialize,

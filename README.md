@@ -117,15 +117,22 @@ To connect to another XPARQ node:
 
 ```bash
 ./target/release/node run \
-  --peer <IP:PORT>
+  --peer <IP_OR_HOSTNAME:PORT>
 ```
 
-Example:
+Connect to the XPARQ mainnet DDNS bootstrap node (IPv6 connectivity required):
 
 ```bash
 ./target/release/node run \
-  --peer 203.0.113.10:6677
+  --peer xparqnode.duckdns.org:6677
 ```
+
+The hostname follows the bootstrap node's changing IPv6 address. It is resolved
+on each connection attempt. Bootstrap peers must be supplied explicitly; the
+default startup does not automatically connect to this hostname.
+
+See [IPv6 and DDNS networking](docs/IPV6_DDNS.md) for IPv6 listener settings,
+public address advertisement, and hostname discovery.
 
 Multiple peers can be provided:
 
@@ -153,11 +160,14 @@ Example:
 
 ```bash
 ./target/release/node run \
-  --p2p 0.0.0.0:6677 \
-  --rpc 127.0.0.1:6666
+  --p2p '[::]:6677' \
+  --rpc '[::]:6666'
 ```
 
-The RPC interface should normally remain bound to localhost unless you deliberately place it behind appropriate network controls.
+`[::]:6666` listens on all IPv6 interfaces. Restrict RPC access with firewall
+rules to the clients that need it. For local requests, use `http://[::1]:6666`;
+remote clients use `http://[PUBLIC_IPV6]:6666` or
+`http://xparqnode.duckdns.org:6666` when RPC is enabled and reachable there.
 
 ## Run a mining node
 
@@ -195,7 +205,7 @@ You can combine mining with peers:
 
 ```bash
 ./target/release/node run \
-  --peer <PEER_IP:6677> \
+  --peer xparqnode.duckdns.org:6677 \
   --miner <XPARQ_ADDRESS>
 ```
 
@@ -225,11 +235,13 @@ sudo ufw allow 6677/tcp
 
 Do **not** expose the RPC port to the public internet unless you understand the security implications.
 
-The default RPC interface is intentionally bound to:
+To listen for RPC connections on IPv6, explicitly pass:
 
 ```text
-127.0.0.1:6666
+--rpc '[::]:6666'
 ```
+
+Without this option, the default RPC listener remains `127.0.0.1:6666`.
 
 ### Advertise a public address
 
@@ -246,6 +258,24 @@ Example:
 ./target/release/node run \
   --public-addr 203.0.113.20:6677
 ```
+
+### Advertise a DDNS hostname
+
+If your public IPv6 changes, advertise your own DDNS hostname instead of an IP
+literal. For the operator of the XPARQ DDNS bootstrap node:
+
+```bash
+./target/release/node run \
+  --p2p '[::]:6677' \
+  --rpc '[::]:6666' \
+  --public-addr xparqnode.duckdns.org:6677
+```
+
+Other node operators should substitute their own hostname. Configure an external
+DDNS updater to keep its AAAA record current. The node preserves and shares the
+hostname through peer storage and discovery, resolves it again on reconnect,
+and refreshes its advertised public IP fallbacks every 60 seconds. See
+[IPv6 and DDNS networking](docs/IPV6_DDNS.md).
 
 ### Automatic NAT traversal
 

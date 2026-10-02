@@ -1,3 +1,5 @@
+use std::{collections::BTreeMap, net::ToSocketAddrs, sync::mpsc, time::Instant};
+
 use super::*;
 use super::{chain_sync::*, config::*, gossip::*, mempool::*, protocol::*, state::*, util::*};
 
@@ -100,9 +102,30 @@ pub(super) fn start_peer_supervisor(
     configured: Vec<String>,
     sync_lock: Arc<Mutex<()>>,
 ) {
+    let configured: Vec<_> = configured
+        .into_iter()
+        .map(|endpoint| {
+            endpoint
+                .parse::<PeerAddress>()
+                .map(|address| address.to_string())
+                .unwrap_or(endpoint)
+        })
+        .collect();
     thread::spawn(move || {
         let mut active = BTreeSet::new();
+        let mut retry = BTreeMap::new();
+        let (events, completed) = mpsc::channel();
+        let mut dialing = 0_usize;
         loop {
+            while let Ok((peer, outcome)) = completed.try_recv() {
+                match outcome {
+                    None => dialing -= 1,
+                    Some((failures, delay)) => {
+                        active.remove(&peer);
+                        retry.insert(peer, (failures, Instant::now() + delay));
+                    }
+                }
+            }
             let mut candidates = configured.clone();
             match PeerStore::load(&database) {
                 Ok(store) => {
@@ -110,80 +133,107 @@ pub(super) fn start_peer_supervisor(
                 }
                 Err(error) => eprintln!("node: load peer store: {error}"),
             }
-            for peer in candidates {
-                if !active.insert(peer.clone()) {
-                    continue;
-                }
+            retry.retain(|peer, (_, until)| {
+                active.contains(peer) || candidates.contains(peer) || *until > Instant::now()
+            });
+            let selected = select_outbound_candidates(&candidates, &active, &retry, dialing);
+            for peer in selected {
+                active.insert(peer.clone());
+                dialing += 1;
                 let database = database.clone();
                 let sync_lock = Arc::clone(&sync_lock);
+                let events = events.clone();
+                let public_only = !configured.contains(&peer);
+                let mut consecutive_failures: u32 =
+                    retry.get(&peer).map_or(0, |(failures, _)| *failures);
                 thread::spawn(move || {
-                    let mut consecutive_failures = 0_u32;
-                    loop {
-                        let result = match sync_lock.lock() {
-                            Ok(_guard) => connect_peer_database(&database, &peer),
-                            Err(_) => Err("outbound sync lock is poisoned".into()),
-                        };
-                        let reconnect_after = match result {
-                            Ok(mut connection) => {
-                                consecutive_failures = 0;
-                                let gossip = gossip_outbound_session(
-                                    &database,
-                                    &mut connection.stream,
-                                    &connection.handshake,
-                                );
-                                match gossip {
-                                    Ok(()) => RECONNECT_INTERVAL,
-                                    Err(error) if error.starts_with(GOSSIP_RESYNC_PREFIX) => {
-                                        eprintln!("node: peer={peer} requires header resync");
-                                        Duration::from_secs(1)
+                    let dialed = dial_peer_database_with_policy(&database, &peer, public_only);
+                    let _ = events.send((peer.clone(), None));
+                    let result = dialed.and_then(|connection| match sync_lock.lock() {
+                        Ok(_guard) => synchronize_peer_database(&database, &peer, connection),
+                        Err(_) => Err("outbound sync lock is poisoned".into()),
+                    });
+                    let reconnect_after = match result {
+                        Ok(mut connection) => {
+                            consecutive_failures = 0;
+                            let gossip = gossip_outbound_session(
+                                &database,
+                                &mut connection.stream,
+                                &connection.handshake,
+                            );
+                            match gossip {
+                                Ok(()) => RECONNECT_INTERVAL,
+                                Err(error) if error.starts_with(GOSSIP_RESYNC_PREFIX) => {
+                                    eprintln!("node: peer={peer} requires header resync");
+                                    Duration::from_secs(1)
+                                }
+                                Err(error) => {
+                                    consecutive_failures = consecutive_failures.saturating_add(1);
+                                    let malicious = gossip_error_is_malicious(&error);
+                                    if let Ok(address) = peer.parse() {
+                                        let _ = record_peer_failure(&database, address, malicious);
                                     }
-                                    Err(error) => {
-                                        consecutive_failures =
-                                            consecutive_failures.saturating_add(1);
-                                        let malicious = gossip_error_is_malicious(&error);
-                                        if let Ok(address) = peer.parse() {
-                                            let _ =
-                                                record_peer_failure(&database, address, malicious);
-                                        }
-                                        let cooldown = if malicious {
-                                            INVALID_POW_COOLDOWN
-                                        } else {
-                                            reconnect_delay_for_error(
-                                                &error,
-                                                consecutive_failures,
-                                                &peer,
-                                            )
-                                        };
-                                        eprintln!(
-                                            "node: peer={peer} gossip session failed: {error} reconnect_after_secs={}",
-                                            cooldown.as_secs()
-                                        );
-                                        cooldown
-                                    }
+                                    let cooldown = if malicious {
+                                        INVALID_POW_COOLDOWN
+                                    } else {
+                                        reconnect_delay_for_error(
+                                            &error,
+                                            consecutive_failures,
+                                            &peer,
+                                        )
+                                    };
+                                    eprintln!(
+                                        "node: peer={peer} gossip session failed: {error} reconnect_after_secs={}",
+                                        cooldown.as_secs()
+                                    );
+                                    cooldown
                                 }
                             }
-                            Err(error) => {
-                                consecutive_failures = consecutive_failures.saturating_add(1);
-                                let malicious = error.starts_with(INVALID_POW_ERROR_PREFIX);
-                                if let Ok(address) = peer.parse() {
-                                    let _ = record_peer_failure(&database, address, malicious);
-                                }
-                                let cooldown =
-                                    reconnect_delay_for_error(&error, consecutive_failures, &peer);
-                                eprintln!(
-                                    "node: outbound peer={peer} sync failed: {error} reconnect_after_secs={}",
-                                    cooldown.as_secs()
-                                );
-                                cooldown
+                        }
+                        Err(error) => {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            let malicious = error.starts_with(INVALID_POW_ERROR_PREFIX);
+                            if let Ok(address) = peer.parse() {
+                                let _ = record_peer_failure(&database, address, malicious);
                             }
-                        };
-                        thread::sleep(reconnect_after);
-                    }
+                            let cooldown =
+                                reconnect_delay_for_error(&error, consecutive_failures, &peer);
+                            eprintln!(
+                                "node: outbound peer={peer} sync failed: {error} reconnect_after_secs={}",
+                                cooldown.as_secs()
+                            );
+                            cooldown
+                        }
+                    };
+                    let _ = events.send((peer, Some((consecutive_failures, reconnect_after))));
                 });
             }
-            thread::sleep(RECONNECT_INTERVAL);
+            thread::sleep(Duration::from_secs(1));
         }
     });
+}
+
+fn select_outbound_candidates(
+    candidates: &[String],
+    active: &BTreeSet<String>,
+    retry: &BTreeMap<String, (u32, Instant)>,
+    dialing: usize,
+) -> Vec<String> {
+    let slots = MAX_OUTBOUND_CONNECTIONS
+        .saturating_sub(active.len())
+        .min(MAX_CONCURRENT_DIALS.saturating_sub(dialing));
+    let now = Instant::now();
+    let mut seen = BTreeSet::new();
+    candidates
+        .iter()
+        .filter(|peer| {
+            !active.contains(*peer)
+                && !retry.get(*peer).is_some_and(|(_, until)| *until > now)
+                && seen.insert((*peer).clone())
+        })
+        .take(slots)
+        .cloned()
+        .collect()
 }
 
 pub(super) fn connect_peer(path: Option<&str>, peer: &str) -> Result<(), String> {
@@ -193,10 +243,68 @@ pub(super) fn connect_peer(path: Option<&str>, peer: &str) -> Result<(), String>
 }
 
 pub(super) fn connect_peer_database(database: &Path, peer: &str) -> Result<ConnectedPeer, String> {
+    let connection = dial_peer_database(database, peer)?;
+    synchronize_peer_database(database, peer, connection)
+}
+
+#[cfg(test)]
+fn connect_with_timeout(peer: &str, timeout: Duration) -> Result<TcpStream, String> {
+    connect_with_policy(peer, timeout, false)
+}
+
+fn connect_with_policy(
+    peer: &str,
+    timeout: Duration,
+    public_only: bool,
+) -> Result<TcpStream, String> {
+    // Resolve on every attempt so DDNS changes are picked up on reconnect.
+    // The system resolver has its own timeout; this budget covers TCP dialing.
+    let addresses = peer
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve peer: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    let mut last_error = "peer resolved to no admissible addresses".to_string();
+    for address in addresses {
+        if public_only && !is_admissible_discovered_peer(&address) {
+            continue;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("connect peer: dial timeout".into());
+        }
+        match TcpStream::connect_timeout(&address, remaining) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = error.to_string(),
+        }
+    }
+    Err(format!("connect peer: {last_error}"))
+}
+
+fn dial_peer_database(database: &Path, peer: &str) -> Result<ConnectedPeer, String> {
+    dial_peer_database_with_policy(database, peer, false)
+}
+
+fn dial_peer_database_with_policy(
+    database: &Path,
+    peer: &str,
+    public_only: bool,
+) -> Result<ConnectedPeer, String> {
     load_or_initialize(database)?;
-    let mut stream = TcpStream::connect(peer).map_err(|error| format!("connect peer: {error}"))?;
-    let connected_address = stream.peer_addr().ok();
+    let mut stream = connect_with_policy(peer, DIAL_TIMEOUT, public_only)?;
     let handshake = exchange_handshake(database, &mut stream)?.peer;
+    Ok(ConnectedPeer { handshake, stream })
+}
+
+fn synchronize_peer_database(
+    database: &Path,
+    peer: &str,
+    connection: ConnectedPeer,
+) -> Result<ConnectedPeer, String> {
+    let ConnectedPeer {
+        handshake,
+        mut stream,
+    } = connection;
+    let connected_address = stream.peer_addr().ok();
     let sync = synchronize_headers(database, &mut stream, &handshake)?;
     let verified = sync.headers.len();
     let preferred = sync.preferred;
@@ -223,8 +331,11 @@ pub(super) fn connect_peer_database(database: &Path, peer: &str) -> Result<Conne
             relay_mempool(database, &mut stream)?;
         }
     }
-    if let Some(address) = connected_address {
-        record_peer_success(database, address)?;
+    if let Ok(endpoint) = peer.parse::<PeerAddress>() {
+        // Preserve DNS identity rather than pinning its transient resolved IP.
+        record_peer_success(database, endpoint)?;
+    } else if let Some(address) = connected_address {
+        record_peer_success(database, address.into())?;
     }
     for address in discovered {
         record_discovered_peer(database, address)?;
@@ -360,18 +471,13 @@ pub(super) fn serve_block_requests(
                 if discovery_requests > 1 {
                     return Err("peer exceeded the discovery request limit".into());
                 }
-                let mut peers = PeerStore::load(database)?.relay_addresses();
-                if let Some(address) = advertised_peer()? {
-                    let address = address.to_string();
-                    if !peers.contains(&address) {
-                        peers.push(address);
+                let mut peers = advertised_peer_addresses()?;
+                for peer in PeerStore::load(database)?.relay_addresses() {
+                    if !peers.contains(&peer) {
+                        peers.push(peer);
                     }
                 }
-                peers.truncate(MAX_DISCOVERED_PEERS);
-                let encoded = canonical_bytes(&peers).map_err(|error| error.to_string())?;
-                if encoded.len() > MAX_PEERS_RESPONSE_SIZE {
-                    return Err("local peer response exceeds size limit".into());
-                }
+                let encoded = encode_discovery_addresses(peers)?;
                 let mut response = Vec::with_capacity(1 + encoded.len());
                 response.push(PEERS_MESSAGE);
                 response.extend_from_slice(&encoded);
@@ -466,7 +572,22 @@ pub(super) fn serve_block_requests(
     }
 }
 
-pub(super) fn record_discovered_peer(database: &Path, address: SocketAddr) -> Result<(), String> {
+fn encode_discovery_addresses(mut peers: Vec<String>) -> Result<Vec<u8>, String> {
+    peers.truncate(MAX_DISCOVERED_PEERS);
+    // Borsh Vec<String>: count plus each string's length prefix and bytes.
+    let mut size = 4;
+    let count = peers
+        .iter()
+        .take_while(|peer| {
+            size += 4 + peer.len();
+            size <= MAX_PEERS_RESPONSE_SIZE
+        })
+        .count();
+    peers.truncate(count);
+    canonical_bytes(&peers).map_err(|error| error.to_string())
+}
+
+pub(super) fn record_discovered_peer(database: &Path, address: PeerAddress) -> Result<(), String> {
     let _guard = peer_store_lock()?
         .lock()
         .map_err(|_| "peer store lock is poisoned")?;
@@ -477,7 +598,7 @@ pub(super) fn record_discovered_peer(database: &Path, address: SocketAddr) -> Re
     Ok(())
 }
 
-pub(super) fn record_peer_success(database: &Path, address: SocketAddr) -> Result<(), String> {
+pub(super) fn record_peer_success(database: &Path, address: PeerAddress) -> Result<(), String> {
     let _guard = peer_store_lock()?
         .lock()
         .map_err(|_| "peer store lock is poisoned")?;
@@ -488,7 +609,7 @@ pub(super) fn record_peer_success(database: &Path, address: SocketAddr) -> Resul
 
 pub(super) fn record_peer_failure(
     database: &Path,
-    address: SocketAddr,
+    address: PeerAddress,
     malicious: bool,
 ) -> Result<(), String> {
     let _guard = peer_store_lock()?
@@ -501,4 +622,98 @@ pub(super) fn record_peer_failure(
 
 pub(super) fn peer_store_lock() -> Result<&'static Mutex<()>, String> {
     Ok(PEER_STORE_LOCK.get_or_init(|| Mutex::new(())))
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn outbound_slots_skip_duplicates_active_and_cooling_peers() {
+        let candidates: Vec<String> = ["active", "cooling", "ready", "ready", "other", "extra"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let mut active = BTreeSet::from(["active".to_string()]);
+        let retry = BTreeMap::from([(
+            "cooling".to_string(),
+            (1, Instant::now() + Duration::from_secs(60)),
+        )]);
+        assert_eq!(
+            select_outbound_candidates(&candidates, &active, &retry, 0),
+            ["ready", "other"]
+        );
+        assert_eq!(
+            select_outbound_candidates(&candidates, &active, &retry, 1),
+            ["ready"]
+        );
+        assert!(
+            select_outbound_candidates(&candidates, &active, &retry, MAX_CONCURRENT_DIALS)
+                .is_empty()
+        );
+        for i in 1..MAX_OUTBOUND_CONNECTIONS {
+            active.insert(format!("connected-{i}"));
+        }
+        assert!(select_outbound_candidates(&candidates, &active, &retry, 0).is_empty());
+        active.remove("connected-1");
+        assert_eq!(
+            select_outbound_candidates(&candidates, &active, &retry, 0),
+            ["ready"]
+        );
+    }
+
+    #[test]
+    fn discovered_dns_cannot_dial_private_resolved_addresses() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("localhost:{}", listener.local_addr().unwrap().port());
+        assert!(connect_with_policy(&endpoint, Duration::from_secs(1), true).is_err());
+        assert!(connect_with_policy(&endpoint, Duration::from_secs(1), false).is_ok());
+    }
+
+    #[test]
+    fn long_dns_names_do_not_exceed_discovery_frame_budget() {
+        let name = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        let endpoint = format!("{name}:6677");
+        assert!(endpoint.parse::<PeerAddress>().unwrap().is_admissible());
+        let encoded = encode_discovery_addresses(vec![endpoint; MAX_DISCOVERED_PEERS]).unwrap();
+        assert!(encoded.len() <= MAX_PEERS_RESPONSE_SIZE);
+        let decoded: Vec<String> = canonical_decode(&encoded).unwrap();
+        assert!(!decoded.is_empty());
+        assert!(decoded.len() < MAX_DISCOVERED_PEERS);
+    }
+
+    #[test]
+    fn zero_dial_budget_does_not_connect() {
+        assert!(
+            connect_with_timeout("[::1]:6677", Duration::ZERO)
+                .unwrap_err()
+                .contains("dial timeout")
+        );
+    }
+
+    #[test]
+    fn dial_accepts_ipv4_ipv6_and_hostname() {
+        for bind in ["127.0.0.1:0", "[::1]:0"] {
+            let listener = TcpListener::bind(bind).unwrap();
+            let address = listener.local_addr().unwrap();
+            let stream =
+                connect_with_timeout(&address.to_string(), Duration::from_secs(2)).unwrap();
+            assert_eq!(stream.peer_addr().unwrap(), address);
+            let _ = listener.accept().unwrap();
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stream = connect_with_timeout(
+            &format!("localhost:{}", address.port()),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), address);
+    }
 }

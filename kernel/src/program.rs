@@ -93,6 +93,9 @@ pub fn validate_program_call(
 impl ValidatedProgramCall {
     pub fn apply(&self, state: &mut ExtensionState) -> Result<AssetJournal, ProgramCallError> {
         match &self.call {
+            DecodedProgramCall::XpqTransfer => Err(ProgramCallError::Program(
+                ProgramError::ExecutionNotImplemented,
+            )),
             DecodedProgramCall::Asset(call) => state
                 .assets
                 .apply(
@@ -207,10 +210,15 @@ pub fn prepare_program_transaction(
     {
         return Err(Error::InvalidAuthorization);
     }
-    let extensions = state.extension_state().ok_or(Error::Intent(
-        crate::transaction::IntentError::InvalidAssetCall,
-    ))?;
-    let created_state_weight = program_created_state_weight(&transaction, chain, extensions)?;
+    let created_state_weight =
+        if transaction.call.program == extension::script::call::ProgramId::XPQ {
+            0
+        } else {
+            let extensions = state.extension_state().ok_or(Error::Intent(
+                crate::transaction::IntentError::InvalidAssetCall,
+            ))?;
+            program_created_state_weight(&transaction, chain, extensions)?
+        };
     let (inputs, outputs) = transaction.payment.coin_parts().ok_or(Error::Intent(
         crate::transaction::IntentError::InvalidAssetCall,
     ))?;
@@ -239,8 +247,12 @@ pub fn program_created_state_weight(
     use crate::consensus::{BurnError, TransactionConsensusError as Error};
     transaction.validate_structure().map_err(Error::Intent)?;
     let mut preview = extensions.clone();
-    let DecodedProgramCall::Asset(call) = decode_program(&transaction.call)
-        .map_err(|_| Error::Intent(crate::transaction::IntentError::InvalidAssetCall))?;
+    let call = match decode_program(&transaction.call)
+        .map_err(|_| Error::Intent(crate::transaction::IntentError::InvalidAssetCall))?
+    {
+        DecodedProgramCall::XpqTransfer => return Ok(0),
+        DecodedProgramCall::Asset(call) => call,
+    };
     let commitment = canonical_bytes(&(
         chain.genesis_hash,
         transaction.signer,
@@ -337,7 +349,9 @@ mod payment_tests {
         let tx = sign(payment);
         assert!(prepare_program_transaction(tx.clone(), chain, 0, &state).is_err());
         let mut preview = state.extensions.clone();
-        let DecodedProgramCall::Asset(decoded) = decode_program(&call).unwrap();
+        let DecodedProgramCall::Asset(decoded) = decode_program(&call).unwrap() else {
+            panic!("expected Asset call")
+        };
         preview
             .assets
             .apply(
@@ -417,5 +431,140 @@ mod payment_tests {
             prepare_program_transaction(tx, ChainContext::new([8; 32]), 0, &state),
             Err(crate::consensus::TransactionConsensusError::InvalidAuthorization)
         ));
+    }
+}
+
+#[cfg(test)]
+mod xpq_transfer_tests {
+    use super::*;
+    use crate::{
+        consensus::{
+            ProtocolBurn, StateTransitionWeight, ValidatedTransaction, validate_transaction,
+        },
+        ledger::{CoinUtxo, LedgerState},
+        monetary::coin::{CoinOutput, CoinShare, Zeno},
+        transaction::{
+            AccountAuthorization, AuthorizedProgramTransaction, AuthorizedTransaction,
+            SpendCharges, SpendIntent, program_transaction_commitment,
+        },
+    };
+    use crypto::{Signature, SigningSeed, address_from_public_key};
+
+    fn fixture() -> (LedgerState, AuthorizedProgramTransaction, ChainContext) {
+        let keys = SigningSeed::new(Signature::MlDsa44, Box::new([91; 32]));
+        let owner = address_from_public_key(&keys.public_key());
+        let input = CoinShare::from_bytes([92; crypto::HASH16_SIZE]);
+        let amount = 1_000_000;
+        let mut state = LedgerState::default();
+        state.coin.total_mined = Zeno::from_zeno(amount);
+        state
+            .utxos
+            .insert_coin(
+                input,
+                CoinUtxo {
+                    owner,
+                    amount: Zeno::from_zeno(amount),
+                },
+            )
+            .unwrap();
+        let chain = ChainContext::new([93; crypto::HASH_SIZE]);
+        let call = extension::coin_program::transfer_call();
+        let mut size = 0;
+        for _ in 0..8 {
+            let fee = (size * 8).max(1);
+            let burn = ProtocolBurn::for_transaction(
+                StateTransitionWeight {
+                    created_coin_utxos: 2,
+                    consumed_coin_utxos: 1,
+                    created_state_weight: 0,
+                },
+                size,
+            )
+            .unwrap()
+            .total()
+            .unwrap()
+            .as_zeno();
+            let payment = SpendIntent::coin_with_charges(
+                owner,
+                vec![input],
+                vec![CoinOutput::new(
+                    Address([94; crypto::ADDRESS_SIZE]),
+                    Zeno::from_zeno(amount - burn - fee),
+                )],
+                SpendCharges::new(Zeno::from_zeno(fee)),
+            )
+            .unwrap();
+            let commitment = program_transaction_commitment(owner, &call, &payment, chain).unwrap();
+            let tx = AuthorizedProgramTransaction {
+                signer: owner,
+                call: call.clone(),
+                payment,
+                authorization: AccountAuthorization {
+                    public_key: keys.public_key(),
+                    signature: keys.sign(commitment.as_bytes()),
+                },
+            };
+            let actual = canonical_bytes(&AuthorizedTransaction::Program(Box::new(tx.clone())))
+                .unwrap()
+                .len() as u64;
+            if actual == size {
+                return (state, tx, chain);
+            }
+            size = actual;
+        }
+        panic!("native transaction size did not converge");
+    }
+
+    #[test]
+    fn xpq_transfer_applies_atomically_and_rolls_back_without_asset_mutation() {
+        let (mut state, tx, chain) = fixture();
+        let before = state.clone();
+        let validated = validate_transaction(
+            AuthorizedTransaction::Program(Box::new(tx)),
+            chain,
+            1,
+            &state,
+        )
+        .unwrap();
+        let ValidatedTransaction::Program(prepared) = &validated else {
+            panic!("expected Program transaction")
+        };
+        assert_eq!(prepared.created_state_weight, 0);
+        let journal = state
+            .apply_validated_transaction(&validated, Address([95; crypto::ADDRESS_SIZE]), chain)
+            .unwrap();
+        assert_eq!(state.extensions, before.extensions);
+        assert!(journal.extension.is_none());
+        assert_ne!(state.utxos, before.utxos);
+        state.rollback_state(journal).unwrap();
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn xpq_transfer_binds_method_payment_and_chain_and_rejects_replay() {
+        let (mut state, tx, chain) = fixture();
+        let mut changed = tx.clone();
+        changed.payment.charges.miner_fee = Zeno::from_zeno(1);
+        assert!(!changed.verify_authorizations(chain, 1).unwrap());
+        assert!(
+            !tx.verify_authorizations(ChainContext::new([96; crypto::HASH_SIZE]), 1)
+                .unwrap()
+        );
+        changed = tx.clone();
+        changed.call.opcode = 2;
+        assert!(changed.validate_structure().is_err());
+        changed = tx.clone();
+        changed.call.payload.push(0);
+        assert!(changed.validate_structure().is_err());
+        state
+            .apply_program_transaction(tx.clone(), Address([95; crypto::ADDRESS_SIZE]), chain, 1)
+            .unwrap();
+        let after = state.clone();
+        assert!(
+            state
+                .apply_program_transaction(tx, Address([95; crypto::ADDRESS_SIZE]), chain, 1)
+                .is_err()
+        );
+        assert_eq!(state, after);
     }
 }

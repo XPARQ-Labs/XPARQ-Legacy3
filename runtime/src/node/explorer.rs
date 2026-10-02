@@ -293,7 +293,7 @@ pub(super) fn address_transaction_activity(
         "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
         "hash": hex::encode(transaction.id().map_err(|error| error.to_string())?),
         "type": transaction_kind(transaction),
-        "program": match transaction {AuthorizedTransaction::Program(tx)=>Some(program_activity_response(tx,address)),_=>None},
+        "program": match transaction {AuthorizedTransaction::Program(tx) if tx.call.program != extension::script::call::ProgramId::XPQ=>Some(program_activity_response(tx,address)),_=>None},
         "direction": direction,
         "amount": amount.as_zeno(),
         "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
@@ -451,6 +451,11 @@ pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
         AuthorizedTransaction::Spend(spend) => match &spend.intent.spend {
             kernel::transaction::Spend::Coin { .. } => "transfer",
         },
+        AuthorizedTransaction::Program(tx)
+            if tx.call.program == extension::script::call::ProgramId::XPQ =>
+        {
+            "transfer"
+        }
         AuthorizedTransaction::Program(_) => "program",
     }
 }
@@ -539,7 +544,7 @@ pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_jso
             }))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let hash = transaction_details
+    let transaction_hashes = transaction_details
         .iter()
         .filter_map(|transaction| transaction.get("hash").cloned())
         .collect::<Vec<_>>();
@@ -551,7 +556,7 @@ pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_jso
         "block_weight": block.block_weight(),
         "nonce": block.header.nonce.0,
         "transactions": block.transaction_count(),
-        "hash": hash,
+        "transaction_hashes": transaction_hashes,
         "transaction_details": transaction_details,
         "miner": kernel::crypto::address_to_string(&block.miner_address()),
         "subsidy": gross_subsidy.as_zeno(),
@@ -640,6 +645,16 @@ fn program_transaction_response(
         asset_program::type_::AssetCall,
         script::execute::{DecodedProgramCall, decode_program},
     };
+    if tx.call.program == extension::script::call::ProgramId::XPQ {
+        return serde_json::json!({
+            "type":"transfer", "program_id":tx.call.program.0, "opcode":tx.call.opcode,
+            "coin_contract":kernel::monetary::coin::CoinContract::derive().to_string(),
+            "signer":kernel::crypto::address_to_string(&tx.signer),
+            "inputs":tx.payment.coin_parts().map(|(inputs,_)|inputs.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            "outputs":coin_outputs(&tx.payment).iter().map(|o|serde_json::json!({"recipient":kernel::crypto::address_to_string(&o.output),"amount":o.amount.as_zeno()})).collect::<Vec<_>>(),
+            "miner_fee":tx.payment.charges.miner_fee.as_zeno(), "protocol_burn":burn.as_zeno(),
+        });
+    }
     let instruction = match decode_program(&tx.call) {
         Ok(DecodedProgramCall::Asset(call)) => match call {
             AssetCall::Register(v) => {
@@ -655,6 +670,7 @@ fn program_transaction_response(
                 serde_json::json!({"type":"burn","asset":v.asset.to_string(),"inputs":v.inputs.iter().map(ToString::to_string).collect::<Vec<_>>(),"amount":v.amount.to_string(),"output":v.output.to_string()})
             }
         },
+        Ok(DecodedProgramCall::XpqTransfer) => serde_json::json!({"type":"xpq_transfer"}),
         Err(_) => serde_json::Value::Null,
     };
     serde_json::json!({"type":"program","program_id":tx.call.program.0,"opcode":tx.call.opcode,"payload":hex::encode(&tx.call.payload),"signer":kernel::crypto::address_to_string(&tx.signer),"asset_instruction":instruction,"coin_inputs":tx.payment.coin_parts().map(|(i,_)|i.iter().map(ToString::to_string).collect::<Vec<_>>()),"coin_outputs":coin_outputs(&tx.payment).iter().map(|o|serde_json::json!({"recipient":kernel::crypto::address_to_string(&output_recipient(o)),"amount":o.amount.as_zeno()})).collect::<Vec<_>>(),"miner_fee":tx.payment.charges.miner_fee.as_zeno(),"protocol_burn":burn.as_zeno()})
@@ -715,6 +731,7 @@ fn program_activity_response(
         Ok(DecodedProgramCall::Asset(AssetCall::Burn(v))) => {
             ("burn", v.asset.to_string(), v.amount.as_units())
         }
+        Ok(DecodedProgramCall::XpqTransfer) => ("xpq_transfer", String::new(), 0),
         Err(_) => ("invalid", String::new(), 0),
     };
     serde_json::json!({"program_id":tx.call.program.0,"opcode":tx.call.opcode,"operation":operation,"asset":asset,"amount":amount.to_string()})

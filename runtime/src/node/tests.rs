@@ -6,6 +6,20 @@ use super::{
 };
 
 #[test]
+fn genesis_rpc_preserves_block_hash_and_empty_transaction_hashes() {
+    let ledger = kernel::genesis::genesis_ledger().unwrap();
+    let block = ledger.chain.block(&Height(0)).unwrap();
+    let response = block_response(&ledger, block).unwrap();
+    assert_eq!(response["hash"], hex::encode(block.hash().unwrap().0));
+    assert_eq!(response["transaction_hashes"], serde_json::json!([]));
+    assert_eq!(response["transactions"], 0);
+    assert_eq!(
+        latest_blocks_response(&ledger).unwrap()["blocks"][0],
+        response
+    );
+}
+
+#[test]
 fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
     let specification: serde_json::Value = serde_json::from_slice(OPENAPI_JSON).unwrap();
     assert_eq!(specification["openapi"], "3.1.0");
@@ -682,8 +696,8 @@ fn explorer_tx_index_finds_canonical_transaction() {
         None,
     );
 
-    // Lookup berikutnya harus mendeteksi marker hilang dan rebuild
-    // BLOCK_HASH_INDEX + TX_INDEX dari canonical ledger.
+    // The next lookup must detect the missing marker and rebuild
+    // BLOCK_HASH_INDEX and TX_INDEX from the canonical ledger.
     let rebuilt_location = transaction_location(&database, &ledger, transaction_hash)
         .expect("rebuild persistent transaction index")
         .expect("transaction after persistent index rebuild");

@@ -260,3 +260,88 @@ fn program_history_cli_displays_asset_units_as_decimal_amounts() {
     server.join().unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires node binary; cargo build -p node -p wallet --bins then run explicitly"]
+fn xpq_program_wallet_cli_spend_and_consolidation() {
+    let binary = Path::new(env!("CARGO_BIN_EXE_wallet")).with_file_name(if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    });
+    assert!(binary.exists(), "build the node binary first");
+    let root = std::env::temp_dir().join(format!(
+        "xparq-native-program-cli-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("data");
+    let file = root.join("wallet.json");
+    let words = wallet::encode_bip39_mnemonic(&[74; 16]).unwrap();
+    let mut owner =
+        wallet::account_wallet_from_bip39_mnemonic(&words, kernel::crypto::Signature::MlDsa44)
+            .unwrap();
+    owner.mnemonic = Some(words);
+    fs::write(&file, &*wallet::account_wallet_file_bytes(&owner).unwrap()).unwrap();
+    let address = kernel::crypto::address_to_string(&owner.address);
+    let receiver = wallet::account_wallet_from_bip39_mnemonic(
+        &wallet::encode_bip39_mnemonic(&[75; 16]).unwrap(),
+        kernel::crypto::Signature::MlDsa44,
+    )
+    .unwrap();
+    let to = kernel::crypto::address_to_string(&receiver.address);
+    mine(&binary, &db, &address);
+    let rpc = free();
+    let p2p = free();
+    let mut node = start(&binary, &db, &rpc, &p2p);
+    let output = cli(&file, &rpc, "sign-spend", &["--to", &to, "--amount", "1"]);
+    let hash = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Tx Hash: "))
+        .unwrap()
+        .to_string();
+    drop(node);
+    mine(&binary, &db, &address);
+    node = start(&binary, &db, &rpc, &p2p);
+    let transaction = get(&rpc, &format!("/explorer/transaction/{hash}"));
+    assert_eq!(transaction["transaction"]["program_id"], 0);
+    assert_eq!(transaction["transaction"]["opcode"], 1);
+    assert_eq!(transaction["transaction"]["type"], "transfer");
+    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    let output = cli(&file, &rpc, "consolidate", &[]);
+    let hash = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Tx Hash: "))
+        .unwrap()
+        .to_string();
+    drop(node);
+    mine(&binary, &db, &address);
+    node = start(&binary, &db, &rpc, &p2p);
+    let transaction = get(&rpc, &format!("/explorer/transaction/{hash}"));
+    assert_eq!(transaction["transaction"]["program_id"], 0);
+    assert!(
+        transaction["transaction"]["inputs"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2
+    );
+    assert_eq!(
+        transaction["transaction"]["outputs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let tip = get(&rpc, "/status")["tip_hash"].clone();
+    drop(node);
+    node = start(&binary, &db, &rpc, &p2p);
+    assert_eq!(get(&rpc, "/status")["tip_hash"], tip);
+    assert_eq!(get(&rpc, &format!("/account/{to}"))["total"], 100_000_000);
+    drop(node);
+    fs::remove_dir_all(root).unwrap();
+}

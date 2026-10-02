@@ -43,7 +43,7 @@ new Coin UTXOs for state growth but do not erase historical transaction bytes.
 
 ## Extension asset program
 
-Panduan langkah demi langkah: [Penggunaan ProgramCall](../docs/PROGRAM_CALL_USAGE.md).
+For integration details, see [ProgramCall documentation](../docs/PROGRAM_CALL.md).
 
 Assets use the extension Program registry and `program-*` commands. Amounts use
 8 decimal places. XPQ fee inputs, change, miner fee and exact protocol burn are

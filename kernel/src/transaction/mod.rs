@@ -1,30 +1,8 @@
 mod authorization;
 mod spend;
 
-use borsh::BorshDeserialize;
-use std::io::{Error, ErrorKind, Read};
-
-/// Maximum canonical transaction size and per-list cardinality in consensus.
 pub const MAX_TRANSACTION_SIZE: usize = 256 * 1024;
-pub const MAX_TRANSACTION_ITEMS: usize = 4096;
-
-fn deserialize_bounded_vec<T: BorshDeserialize, R: Read>(
-    reader: &mut R,
-    maximum: usize,
-) -> std::io::Result<Vec<T>> {
-    let length = u32::deserialize_reader(reader)? as usize;
-    if length > maximum {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "transaction list exceeds limit",
-        ));
-    }
-    let mut items = Vec::new();
-    for _ in 0..length {
-        items.push(T::deserialize_reader(reader)?);
-    }
-    Ok(items)
-}
+pub use extension::coin_program::MAX_TRANSACTION_ITEMS;
 
 pub use crate::error::{IntentError, TransactionEncodingError};
 pub use authorization::{
@@ -40,6 +18,7 @@ pub type Transaction = AuthorizedTransaction;
 mod phase3_bounds_tests {
     use super::*;
     use crate::monetary::coin::CoinShare;
+    use borsh::BorshDeserialize;
     use crypto::Address;
 
     #[test]

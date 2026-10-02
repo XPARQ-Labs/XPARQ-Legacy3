@@ -20,3 +20,16 @@ pub use codec::{
 pub use error::CryptoError;
 pub use hash::*;
 pub use signature::*;
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, borsh::BorshSerialize, borsh::BorshDeserialize,
+)]
+pub struct ChainContext {
+    pub genesis_hash: [u8; crate::HASH_SIZE],
+}
+
+impl ChainContext {
+    pub const fn new(genesis_hash: [u8; crate::HASH_SIZE]) -> Self {
+        Self { genesis_hash }
+    }
+}

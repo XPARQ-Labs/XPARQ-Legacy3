@@ -279,28 +279,37 @@ impl LedgerState {
             .semantic_commitment(chain)
             .map_err(crate::consensus::TransactionConsensusError::Intent)?;
         let spend = staged.apply_onchain_spend_with_commitment(&tx.payment, commitment, miner)?;
-        let extension::script::execute::DecodedProgramCall::Asset(call) =
-            extension::script::execute::decode_program(&tx.call)
-                .map_err(|_| StateError::InvalidTransaction)?;
-        let bytes =
-            crypto::canonical_bytes(&(chain.genesis_hash, tx.signer, &tx.call, &tx.payment))?;
-        let journal = staged
-            .extensions
-            .assets
-            .apply(
-                &call,
-                extension::asset_program::state::ExecutionContext {
-                    signer: tx.signer,
-                    commitment: crypto::domain(crypto::HashDomain::AssetIntent, &bytes)
-                        .into_bytes(),
-                },
-            )
-            .map_err(|_| StateError::InvalidTransaction)?;
+        let journal = match extension::script::execute::decode_program(&tx.call)
+            .map_err(|_| StateError::InvalidTransaction)?
+        {
+            extension::script::execute::DecodedProgramCall::XpqTransfer => None,
+            extension::script::execute::DecodedProgramCall::Asset(call) => {
+                let bytes = crypto::canonical_bytes(&(
+                    chain.genesis_hash,
+                    tx.signer,
+                    &tx.call,
+                    &tx.payment,
+                ))?;
+                let journal = staged
+                    .extensions
+                    .assets
+                    .apply(
+                        &call,
+                        extension::asset_program::state::ExecutionContext {
+                            signer: tx.signer,
+                            commitment: crypto::domain(crypto::HashDomain::AssetIntent, &bytes)
+                                .into_bytes(),
+                        },
+                    )
+                    .map_err(|_| StateError::InvalidTransaction)?;
+                Some(journal)
+            }
+        };
         staged.validate_supply_invariants()?;
         *self = staged;
         Ok(StateRollbackJournal {
             spend: Some(spend),
-            extension: Some(journal),
+            extension: journal,
         })
     }
 }

@@ -1,3 +1,5 @@
+use std::net::ToSocketAddrs;
+
 use super::util::*;
 use super::*;
 
@@ -43,7 +45,7 @@ impl RunConfig {
                         args.get(index)
                             .ok_or("missing value for --public-addr")?
                             .parse()
-                            .map_err(|_| "invalid --public-addr socket address")?,
+                            .map_err(|_| "invalid --public-addr endpoint")?,
                     );
                 }
                 "--nat-traversal" => nat_traversal = true,
@@ -71,11 +73,36 @@ pub(super) fn configure_public_address(config: &RunConfig) -> Result<(), String>
     if config.public_addr.is_some() && config.nat_traversal {
         return Err("use either --public-addr or --nat-traversal, not both".into());
     }
-    if let Some(address) = config.public_addr {
-        if !is_admissible_discovered_peer(&address) {
-            return Err("--public-addr must be a public, non-zero socket address".into());
+    if let Some(address) = config.public_addr.clone() {
+        if !address.is_admissible() {
+            return Err(
+                "--public-addr must be a public IP or DNS hostname with a non-zero port".into(),
+            );
         }
-        set_advertised_peer(Some(address))?;
+        set_advertised_peer(Some(address.clone()))?;
+        if matches!(address, PeerAddress::Dns { .. }) {
+            thread::spawn(move || {
+                loop {
+                    match address.to_string().to_socket_addrs() {
+                        Ok(addresses) => {
+                            let public: Vec<_> = addresses
+                                .filter(is_admissible_discovered_peer)
+                                .take(MAX_DISCOVERED_PEERS)
+                                .collect();
+                            if let Err(error) = replace_advertised_dns_ips(&address, &public) {
+                                eprintln!("node: refresh DDNS advertisement: {error}");
+                            }
+                        }
+                        Err(error) => {
+                            // Do not continue announcing potentially obsolete IP fallbacks.
+                            let _ = replace_advertised_dns_ips(&address, &[]);
+                            eprintln!("node: resolve advertised DDNS endpoint: {error}");
+                        }
+                    }
+                    thread::sleep(Duration::from_secs(60));
+                }
+            });
+        }
     }
     if !config.nat_traversal {
         return Ok(());
@@ -88,7 +115,7 @@ pub(super) fn configure_public_address(config: &RunConfig) -> Result<(), String>
     if !is_admissible_discovered_peer(&mapping.public_addr) {
         return Err("NAT gateway returned a non-public address".into());
     }
-    set_advertised_peer(Some(mapping.public_addr))?;
+    set_advertised_peer(Some(mapping.public_addr.into()))?;
     println!(
         "nat: mapped public_addr={} lease_secs={}",
         mapping.public_addr,
@@ -99,7 +126,7 @@ pub(super) fn configure_public_address(config: &RunConfig) -> Result<(), String>
             thread::sleep(mapping.lease / 2);
             match crate::nat::map_tcp_listener(listener, DEFAULT_NAT_LEASE) {
                 Ok(refreshed) if is_admissible_discovered_peer(&refreshed.public_addr) => {
-                    if let Err(error) = set_advertised_peer(Some(refreshed.public_addr)) {
+                    if let Err(error) = set_advertised_peer(Some(refreshed.public_addr.into())) {
                         eprintln!("node: update NAT public address: {error}");
                     }
                 }
@@ -111,20 +138,68 @@ pub(super) fn configure_public_address(config: &RunConfig) -> Result<(), String>
     Ok(())
 }
 
-pub(super) fn advertised_peer() -> Result<Option<SocketAddr>, String> {
-    ADVERTISED_PEER
-        .get_or_init(|| RwLock::new(None))
-        .read()
-        .map(|address| *address)
-        .map_err(|_| "advertised peer lock is poisoned".into())
+pub(super) struct PublicAdvertisement {
+    endpoint: PeerAddress,
+    resolved: Vec<SocketAddr>,
 }
 
-pub(super) fn set_advertised_peer(address: Option<SocketAddr>) -> Result<(), String> {
+impl PublicAdvertisement {
+    fn replace_resolved(&mut self, addresses: &[SocketAddr]) {
+        self.resolved = addresses
+            .iter()
+            .copied()
+            .filter(is_admissible_discovered_peer)
+            .take(MAX_DISCOVERED_PEERS - 1)
+            .collect();
+        self.resolved.sort();
+        self.resolved.dedup();
+    }
+
+    fn addresses(&self) -> Vec<String> {
+        let mut addresses = vec![self.endpoint.to_string()];
+        if matches!(self.endpoint, PeerAddress::Dns { .. }) {
+            addresses.extend(self.resolved.iter().map(ToString::to_string));
+        }
+        addresses
+    }
+}
+
+pub(super) fn set_advertised_peer(address: Option<PeerAddress>) -> Result<(), String> {
     *ADVERTISED_PEER
         .get_or_init(|| RwLock::new(None))
         .write()
-        .map_err(|_| "advertised peer lock is poisoned")? = address;
+        .map_err(|_| "advertised peer lock is poisoned")? =
+        address.map(|endpoint| PublicAdvertisement {
+            endpoint,
+            resolved: Vec::new(),
+        });
     Ok(())
+}
+
+fn replace_advertised_dns_ips(
+    endpoint: &PeerAddress,
+    addresses: &[SocketAddr],
+) -> Result<(), String> {
+    let mut advertisement = ADVERTISED_PEER
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .map_err(|_| "advertised peer lock is poisoned")?;
+    if let Some(current) = advertisement.as_mut() {
+        if current.endpoint == *endpoint {
+            current.replace_resolved(addresses);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn advertised_peer_addresses() -> Result<Vec<String>, String> {
+    let advertisement = ADVERTISED_PEER
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .map_err(|_| "advertised peer lock is poisoned")?;
+    Ok(advertisement
+        .as_ref()
+        .map_or_else(Vec::new, PublicAdvertisement::addresses))
 }
 
 pub(super) fn print_network_info() -> Result<(), String> {
@@ -190,4 +265,39 @@ pub(super) fn default_database() -> &'static str {
 #[cfg(feature = "devnet")]
 pub(super) fn default_database() -> &'static str {
     "./data/devnet"
+}
+
+#[cfg(test)]
+mod ddns_tests {
+    use super::*;
+
+    #[test]
+    fn public_addr_accepts_ddns_and_preserves_ipv6_literals() {
+        for endpoint in ["xparqnode.duckdns.org:6677", "[2606:4700::1111]:6677"] {
+            let config = RunConfig::parse(&["--public-addr".into(), endpoint.into()]).unwrap();
+            let address = config.public_addr.unwrap();
+            assert_eq!(address.to_string(), endpoint);
+            assert!(address.is_admissible());
+        }
+    }
+
+    #[test]
+    fn refresh_replaces_old_ipv6_and_keeps_hostname() {
+        let mut advertisement = PublicAdvertisement {
+            endpoint: "xparqnode.duckdns.org:6677".parse().unwrap(),
+            resolved: Vec::new(),
+        };
+        advertisement.replace_resolved(&["[2606:4700::1111]:6677".parse().unwrap()]);
+        advertisement.replace_resolved(&[
+            "[2606:4700::1001]:6677".parse().unwrap(),
+            "[::1]:6677".parse().unwrap(),
+            "[2606:4700::1001]:6677".parse().unwrap(),
+        ]);
+        assert_eq!(
+            advertisement.addresses(),
+            ["xparqnode.duckdns.org:6677", "[2606:4700::1001]:6677"]
+        );
+        advertisement.replace_resolved(&[]);
+        assert_eq!(advertisement.addresses(), ["xparqnode.duckdns.org:6677"]);
+    }
 }

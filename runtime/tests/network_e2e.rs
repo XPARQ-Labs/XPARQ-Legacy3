@@ -127,6 +127,10 @@ fn http_get(rpc: &str, route: &str) -> Result<Value, String> {
 }
 
 fn post_transaction(rpc: &str, transaction: &Transaction) -> Value {
+    post_program_rpc(rpc, "/transaction", transaction)
+}
+
+fn post_program_rpc(rpc: &str, route: &str, transaction: &Transaction) -> Value {
     let body = canonical_bytes(transaction).unwrap();
     let mut stream = TcpStream::connect(rpc).unwrap();
     stream
@@ -134,7 +138,7 @@ fn post_transaction(rpc: &str, transaction: &Transaction) -> Value {
         .unwrap();
     write!(
         stream,
-        "POST /transaction HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {route} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )
     .unwrap();
@@ -201,10 +205,18 @@ fn block_gossip_crosses_three_nodes_and_survives_restart() {
     let c_rpc = free_address();
     let a_node = start_node(&a, &a_p2p, &a_rpc, &[], None);
     wait_for_status(&a_rpc, |_| true);
-    let b_node = start_node(&b, &b_p2p, &b_rpc, &[&a_p2p], None);
+    // A reachable peer that never handshakes must not hold the chain sync lock.
+    let silent_peer = TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_address = silent_peer.local_addr().unwrap().to_string();
+    let started = Instant::now();
+    let b_node = start_node(&b, &b_p2p, &b_rpc, &[&silent_address, &a_p2p], None);
     wait_for_status(&b_rpc, |_| true);
     let c_node = start_node(&c, &c_p2p, &c_rpc, &[&b_p2p], None);
     let synced = wait_for_status(&c_rpc, |status| status["tip_height"] == 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "healthy peer sync waited for the silent peer's 60-second handshake timeout"
+    );
     let expected_tip = synced["tip_hash"].clone();
 
     drop(c_node);
@@ -344,7 +356,7 @@ fn signed_wallet_transaction_gossips_is_mined_and_survives_restart() {
         )
         .unwrap();
         let transaction =
-            AuthorizedTransaction::Spend(Box::new(sender.sign_account_intent(intent).unwrap()));
+            AuthorizedTransaction::Program(Box::new(sender.sign_xpq_transfer(intent).unwrap()));
         let required = (canonical_bytes(&transaction).unwrap().len() as u64)
             .checked_mul(8)
             .unwrap();
@@ -525,6 +537,13 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
     mine_program();
     let node = start_node(&root, &p2p, &rpc, &[], None);
     let mined = wait_for_status(&rpc, |s| s["tip_height"] == 2);
+    let block = http_get(&rpc, "/block/2").unwrap();
+    assert_eq!(block["hash"], mined["tip_hash"]);
+    assert_eq!(
+        block["transaction_hashes"],
+        serde_json::json!([hash.clone()])
+    );
+    assert_eq!(block["transaction_details"][0]["hash"], hash);
     let response = http_get(&rpc, &format!("/explorer/transaction/{hash}")).unwrap();
     assert_eq!(response["status"], "confirmed");
     assert_eq!(response["height"], 2);
@@ -545,3 +564,65 @@ fn program_call_is_accepted_mined_and_replayed_after_redb_restart() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn advertised_dns_is_discovered_and_persisted_across_restart() {
+    use redb::{ReadableDatabase, TableDefinition};
+    let root = temp_root("ddns-discovery");
+    let a = root.join("a");
+    let b = root.join("b");
+    let a_p2p = free_address();
+    let a_rpc = free_address();
+    let server = NodeProcess(
+        Command::new(node_binary())
+            .args([
+                "run",
+                "--data",
+                a.to_str().unwrap(),
+                "--p2p",
+                &a_p2p,
+                "--rpc",
+                &a_rpc,
+                "--public-addr",
+                "node.example.invalid:6677",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_status(&a_rpc, |_| true);
+    let connected = Command::new(node_binary())
+        .args(["peer", b.to_str().unwrap(), &a_p2p])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(connected.success());
+    drop(server);
+
+    let check_stored = || {
+        let db = redb::Database::open(b.join("xparq.redb")).unwrap();
+        let read = db.begin_read().unwrap();
+        let table = read
+            .open_table(TableDefinition::<&str, &[u8]>::new("auxiliary"))
+            .unwrap();
+        let bytes = table.get("peers").unwrap().unwrap();
+        let peers: Value = serde_json::from_slice(bytes.value()).unwrap();
+        assert!(
+            peers["peers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|record| record["address"] == "node.example.invalid:6677")
+        );
+    };
+    check_stored();
+    let b_rpc = free_address();
+    let restarted = start_node(&b, &free_address(), &b_rpc, &[], None);
+    wait_for_status(&b_rpc, |_| true);
+    drop(restarted);
+    check_stored();
+    fs::remove_dir_all(root).unwrap();
+}
+
+mod program_network;

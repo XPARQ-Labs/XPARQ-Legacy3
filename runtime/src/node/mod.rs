@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use crate::peer::{MAX_DISCOVERED_PEERS, PeerStore, is_admissible_discovered_peer};
+use crate::peer::{MAX_DISCOVERED_PEERS, PeerAddress, PeerStore, is_admissible_discovered_peer};
 use crate::sync::{
     HeaderChainChunk, MAX_HEADER_CHAIN_CHUNK_HEADERS, MAX_HEADER_CHAIN_CHUNK_SIZE,
     decode_header_chain_chunk,
@@ -92,6 +92,9 @@ const MAX_MEMPOOL_TRANSACTIONS: usize = MAX_GOSSIP_INVENTORY_ITEMS;
 const MIN_RELAY_FEE_ZENO_PER_BYTE: u64 = 8;
 const MAX_GOSSIP_INVENTORY_SIZE: usize = 64 * 1024;
 const GOSSIP_HEARTBEAT: Duration = Duration::from_secs(2);
+const MAX_OUTBOUND_CONNECTIONS: usize = 8;
+const MAX_CONCURRENT_DIALS: usize = 2;
+const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INBOUND_CONNECTIONS: usize = 64;
 const MAX_INBOUND_CONNECTIONS_PER_IP: usize = 4;
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
@@ -119,7 +122,7 @@ struct CachedLedger {
 }
 
 static LEDGER_CACHE: OnceLock<RwLock<Option<CachedLedger>>> = OnceLock::new();
-static ADVERTISED_PEER: OnceLock<RwLock<Option<SocketAddr>>> = OnceLock::new();
+static ADVERTISED_PEER: OnceLock<RwLock<Option<config::PublicAdvertisement>>> = OnceLock::new();
 static STATE_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static PEER_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static GOSSIP_NOTIFIER: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
@@ -130,7 +133,7 @@ struct RunConfig {
     rpc_listen: String,
     peers: Vec<String>,
     miner: Option<Address>,
-    public_addr: Option<SocketAddr>,
+    public_addr: Option<PeerAddress>,
     nat_traversal: bool,
     #[cfg(feature = "litep2p-devnet")]
     litep2p: bool,

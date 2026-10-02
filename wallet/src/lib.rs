@@ -268,6 +268,14 @@ impl AccountWallet {
         })
     }
 
+    /// Sign a native XPQ.Transfer ProgramCall, binding its transfer and fee.
+    pub fn sign_xpq_transfer(
+        &self,
+        payment: kernel::transaction::SpendIntent,
+    ) -> Result<kernel::transaction::AuthorizedProgramTransaction, String> {
+        self.sign_program_call(extension::coin_program::transfer_call(), payment)
+    }
+
     /// Bind the extension call and its XPQ payment in one authorization.
     pub fn sign_program_call(
         &self,

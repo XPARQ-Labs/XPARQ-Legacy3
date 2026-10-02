@@ -67,7 +67,7 @@ pub(super) fn decode_gossip_inventory(bytes: &[u8]) -> Result<GossipInventory, S
     Ok(inventory)
 }
 
-pub(super) fn request_discovered_peers(stream: &mut TcpStream) -> Result<Vec<SocketAddr>, String> {
+pub(super) fn request_discovered_peers(stream: &mut TcpStream) -> Result<Vec<PeerAddress>, String> {
     write_frame(stream, &[GET_PEERS_MESSAGE])?;
     let response = read_frame(stream, 1 + MAX_PEERS_RESPONSE_SIZE)?;
     if response.first() != Some(&PEERS_MESSAGE) {
@@ -89,7 +89,7 @@ pub(super) fn request_discovered_peers(stream: &mut TcpStream) -> Result<Vec<Soc
     Ok(peers
         .into_iter()
         .filter_map(|peer| peer.parse().ok())
-        .filter(is_admissible_discovered_peer)
+        .filter(PeerAddress::is_admissible)
         .collect())
 }
 
@@ -376,4 +376,39 @@ pub(super) fn accept_relayed_block(database: &Path, bytes: &[u8]) -> Result<(), 
     let _ = update_ledger_cache(database, ledger)?;
     notify_gossip();
     Ok(())
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_accepts_dns_strings_without_resolving_and_filters_private_ips() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert_eq!(read_frame(&mut stream, 1).unwrap(), [GET_PEERS_MESSAGE]);
+            let endpoints = vec![
+                "node.example.invalid:6677",
+                "[2606:4700::1111]:6677",
+                "127.0.0.1:6677",
+                "node.local:6677",
+                "bad host:6677",
+            ];
+            let mut response = vec![PEERS_MESSAGE];
+            response.extend(canonical_bytes(&endpoints).unwrap());
+            write_frame(&mut stream, &response).unwrap();
+        });
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let peers = request_discovered_peers(&mut stream).unwrap();
+        assert_eq!(
+            peers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["node.example.invalid:6677", "[2606:4700::1111]:6677"]
+        );
+        server.join().unwrap();
+    }
 }

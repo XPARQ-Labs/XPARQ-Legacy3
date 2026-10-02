@@ -214,32 +214,7 @@ pub use transaction_errors::*;
 mod transaction_errors {
     use std::{error::Error as StdError, fmt};
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum IntentError {
-        EmptyInputs,
-        EmptyOutputs,
-        ZeroAmount,
-        DuplicateInput,
-        TooManyItems,
-        InvalidAssetCall,
-        Encoding,
-    }
-
-    impl fmt::Display for IntentError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                Self::EmptyInputs => formatter.write_str("intent has no inputs"),
-                Self::EmptyOutputs => formatter.write_str("intent has no outputs"),
-                Self::ZeroAmount => formatter.write_str("intent contains a zero amount"),
-                Self::DuplicateInput => formatter.write_str("intent contains a duplicate input"),
-                Self::TooManyItems => formatter.write_str("intent list exceeds consensus limit"),
-                Self::InvalidAssetCall => formatter.write_str("asset call is structurally invalid"),
-                Self::Encoding => formatter.write_str("intent encoding failed"),
-            }
-        }
-    }
-
-    impl StdError for IntentError {}
+    pub use extension::coin_program::IntentError;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum TransactionEncodingError {

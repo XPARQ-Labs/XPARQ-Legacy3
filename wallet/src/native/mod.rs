@@ -36,8 +36,8 @@ impl LoadedWallet {
     fn sign_onchain_spend(
         &self,
         intent: SpendIntent,
-    ) -> Result<kernel::transaction::AuthorizedAccountIntent<SpendIntent>, String> {
-        self.0.sign_account_intent(intent)
+    ) -> Result<kernel::transaction::AuthorizedProgramTransaction, String> {
+        self.0.sign_xpq_transfer(intent)
     }
 }
 #[cfg(feature = "mainnet")]

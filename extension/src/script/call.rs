@@ -9,6 +9,7 @@ pub const MAX_PROGRAM_PAYLOAD_SIZE: usize = 64 * 1024;
 pub struct ProgramId(pub u32);
 
 impl ProgramId {
+    pub const XPQ: Self = Self(0);
     pub const ASSET: Self = Self(1);
 }
 
